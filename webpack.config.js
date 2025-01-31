@@ -4,7 +4,7 @@ const devCerts = require("office-addin-dev-certs");
 const CopyWebpackPlugin = require("copy-webpack-plugin");
 const HtmlWebpackPlugin = require("html-webpack-plugin");
 const webpack = require("webpack");
-const Dotenv = require('dotenv-webpack');
+const Dotenv = require("dotenv-webpack");
 
 const urlDev = "https://localhost:3000/";
 const urlProd = "https://www.contoso.com/"; // CHANGE THIS TO YOUR PRODUCTION DEPLOYMENT LOCATION
@@ -36,7 +36,7 @@ module.exports = async (env, options) => {
           test: /\.ts$/,
           exclude: /node_modules/,
           use: {
-            loader: "babel-loader"
+            loader: "babel-loader",
           },
         },
         {
@@ -60,7 +60,7 @@ module.exports = async (env, options) => {
     },
     plugins: [
       new Dotenv({
-        path: `./.env.${options.mode}`, // Carga .env.development o .env.production
+        path: `./.env`, // Carga .env.development o .env.production
       }),
       new HtmlWebpackPlugin({
         filename: "taskpane.html",
