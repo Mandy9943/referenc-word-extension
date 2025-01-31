@@ -119,7 +119,6 @@ const App: React.FC = () => {
     <div className={styles.root}>
       <div className={styles.buttonContainer}>
         <Text className={styles.title}>Reference Manager</Text>
-
         <Button
           appearance="secondary"
           onClick={handleRemoveReferences}
@@ -136,6 +135,7 @@ const App: React.FC = () => {
         >
           Add References
         </Button>
+        test
         {getStatusDisplay()}
       </div>
     </div>
