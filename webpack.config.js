@@ -60,7 +60,10 @@ module.exports = async (env, options) => {
     },
     plugins: [
       new Dotenv({
-        path: `./.env`, // Carga .env.development o .env.production
+        path: `./.env`,
+        systemvars: true,
+        safe: true,
+        defaults: true,
       }),
       new HtmlWebpackPlugin({
         filename: "taskpane.html",
