@@ -33,7 +33,14 @@ export async function analyzeDocument(): Promise<string> {
 
       const text = bodyText.text;
       // Define possible reference headers
-      const referenceHeaders = ["Reference List", "References List", "References"];
+      const referenceHeaders = [
+        "Reference List",
+        "References List",
+        "References",
+        "REFERENCES LIST",
+        "REFERENCE LIST",
+        "REFERENCES",
+      ];
 
       // Find the first matching header and its index
       let referenceIndex = -1;
@@ -49,12 +56,17 @@ export async function analyzeDocument(): Promise<string> {
 
       if (referenceIndex !== -1) {
         const referenceSection = text.substring(referenceIndex);
-        const formattedRefs = await getFormattedReferences(referenceSection);
-        console.log(referenceSection);
+        try {
+          const formattedRefs = await getFormattedReferences(referenceSection);
+          console.log({ referenceSection });
 
-        references = formattedRefs.split("\n\n");
-        references = references.map((ref) => ref.trim());
-        console.log("References:", references);
+          references = formattedRefs.split("\n\n");
+          references = references.map((ref) => ref.trim());
+          console.log("References:", references);
+        } catch (error) {
+          console.error("Error in getFormattedReferences:", error);
+          throw error;
+        }
       } else {
         return "No Reference List section found";
       }
@@ -115,7 +127,7 @@ export async function analyzeDocument(): Promise<string> {
     });
   } catch (error) {
     console.error("Error in analyzeDocument:", error);
-    return `Error modifying document: ${error.message}`;
+    throw new Error(`Error modifying document: ${error.message}`);
   }
 }
 
