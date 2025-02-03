@@ -1,5 +1,5 @@
 /* global Word console */
-import { getFormattedReferences } from "./deepseek";
+import { getFormattedReferences } from "./gemini";
 
 export async function insertText(text: string) {
   // Write text to the document.
