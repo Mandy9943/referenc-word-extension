@@ -135,7 +135,7 @@ const App: React.FC = () => {
         >
           Add References
         </Button>
-        gemini
+        gemini v1
         {getStatusDisplay()}
       </div>
     </div>
