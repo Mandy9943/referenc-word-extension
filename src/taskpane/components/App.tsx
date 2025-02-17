@@ -1,6 +1,6 @@
 import { Button, makeStyles, Text, tokens } from "@fluentui/react-components";
 import * as React from "react";
-import { analyzeDocument, removeReferences } from "../word";
+import { analyzeDocument, humanizeDocument, removeReferences } from "../word";
 
 const useStyles = makeStyles({
   root: {
@@ -85,6 +85,16 @@ const App: React.FC = () => {
     }
   };
 
+  const handleHumanizeDocument = async () => {
+    setStatus("loading");
+    try {
+      await humanizeDocument();
+      setStatus("success");
+    } catch (error) {
+      setStatus("error");
+    }
+  };
+
   const getStatusDisplay = () => {
     const baseClassName = `${styles.status} `;
     switch (status) {
@@ -135,7 +145,15 @@ const App: React.FC = () => {
         >
           Add References
         </Button>
-        gemini v1
+        <Button
+          appearance="primary"
+          onClick={handleHumanizeDocument}
+          disabled={status === "loading"}
+          className={styles.button}
+        >
+          Humanize Text
+        </Button>
+        gemini v1.1
         {getStatusDisplay()}
       </div>
     </div>

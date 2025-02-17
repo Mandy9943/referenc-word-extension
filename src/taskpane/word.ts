@@ -211,3 +211,120 @@ export async function removeReferences(): Promise<string> {
     return errorMessage;
   }
 }
+
+interface SubmitResponse {
+  status: string;
+  id: string;
+}
+
+interface DocumentResponse {
+  id: string;
+  output: string;
+  input: string;
+  readability: string;
+  createdDate: string;
+  purpose: string;
+}
+
+async function getDocumentWithRetries(
+  apiKey: string,
+  documentId: string,
+  maxRetries = 3,
+  delayMs = 5000
+): Promise<DocumentResponse> {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    // Wait before each attempt
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+    const documentResponse = await fetch("https://humanize.undetectable.ai/document", {
+      method: "POST",
+      headers: {
+        apikey: apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ id: documentId }),
+    });
+
+    const documentResult: DocumentResponse = await documentResponse.json();
+
+    if (documentResult.output) {
+      return documentResult;
+    }
+
+    console.log(`Attempt ${attempt}: Output not ready yet, retrying...`);
+
+    // Increase delay for next attempt
+    delayMs *= 1.5;
+  }
+
+  throw new Error("Failed to get document output after maximum retries");
+}
+
+export async function humanizeDocument(): Promise<string> {
+  const API_KEY = process.env.HUMANIZE_API_KEY;
+
+  try {
+    return await Word.run(async (context) => {
+      const paragraphs = context.document.body.paragraphs;
+      paragraphs.load("text");
+      await context.sync();
+
+      const paragraphTexts = paragraphs.items.map((p) => p.text);
+
+      // Filter paragraphs using the same logic as analyzeDocument
+      const excludeIndexes = paragraphTexts
+        .map((para, index) => (para.endsWith(": ") || para.split(" ").length <= 11 ? index : -1))
+        .filter((index) => index !== -1);
+
+      const availableIndexes = Array.from({ length: paragraphTexts.length }, (_, i) => i).filter(
+        (index) => !excludeIndexes.includes(index)
+      );
+
+      // Process each valid paragraph
+      for (const index of availableIndexes) {
+        const paragraph = paragraphs.items[index];
+        const text = paragraph.text.trim();
+
+        if (text.length >= 50) {
+          // API requirement
+          try {
+            // Step 1: Submit the content
+            const submitResponse = await fetch("https://humanize.undetectable.ai/submit", {
+              method: "POST",
+              headers: {
+                apikey: API_KEY,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                content: text,
+                readability: "High School",
+                purpose: "General Writing",
+                strength: "More Human",
+                model: "v11",
+              }),
+            });
+
+            const submitResult: SubmitResponse = await submitResponse.json();
+
+            // Step 2: Get document with retries
+            try {
+              const documentResult = await getDocumentWithRetries(API_KEY, submitResult.id);
+              paragraph.insertText(documentResult.output, Word.InsertLocation.replace);
+              await context.sync(); // Sync after each paragraph update
+            } catch (retryError) {
+              console.error(`Failed to get humanized content for paragraph ${index}:`, retryError);
+            }
+          } catch (error) {
+            console.error(`Error processing paragraph ${index}:`, error);
+          }
+        }
+      }
+
+      await context.sync();
+      return "Document humanized successfully";
+    });
+  } catch (error) {
+    console.error("Error in humanizeDocument:", error);
+    throw new Error(`Error humanizing document: ${error.message}`);
+  }
+}

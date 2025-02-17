@@ -5,6 +5,7 @@ import { insertText as insertTextInPowerPoint } from "./powerpoint";
 import { insertText as insertTextInProject } from "./project";
 import {
   analyzeDocument as analyzeDocumentInWord,
+  humanizeDocument as humanizeDocumentInWord,
   insertText as insertTextInWord,
   removeReferences as removeReferencesInWord,
 } from "./word";
@@ -52,6 +53,15 @@ export async function removeReferences() {
   await Office.onReady();
   if (Office.context.host === Office.HostType.Word) {
     return await removeReferencesInWord();
+  } else {
+    throw new Error("This function is only available in Word");
+  }
+}
+
+export async function humanizeDocument() {
+  await Office.onReady();
+  if (Office.context.host === Office.HostType.Word) {
+    return await humanizeDocumentInWord();
   } else {
     throw new Error("This function is only available in Word");
   }
