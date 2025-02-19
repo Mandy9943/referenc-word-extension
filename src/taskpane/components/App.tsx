@@ -153,7 +153,7 @@ const App: React.FC = () => {
         >
           Humanize Text
         </Button>
-        gemini v1.1
+        gemini v1.3
         {getStatusDisplay()}
       </div>
     </div>

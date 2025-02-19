@@ -1,4 +1,5 @@
 /* global Word console */
+import { Anthropic } from "@anthropic-ai/sdk";
 import { getFormattedReferences } from "./gemini";
 
 export async function insertText(text: string) {
@@ -212,59 +213,19 @@ export async function removeReferences(): Promise<string> {
   }
 }
 
-interface SubmitResponse {
-  status: string;
-  id: string;
-}
-
-interface DocumentResponse {
-  id: string;
-  output: string;
-  input: string;
-  readability: string;
-  createdDate: string;
-  purpose: string;
-}
-
-async function getDocumentWithRetries(
-  apiKey: string,
-  documentId: string,
-  maxRetries = 3,
-  delayMs = 5000
-): Promise<DocumentResponse> {
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    // Wait before each attempt
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
-
-    const documentResponse = await fetch("https://humanize.undetectable.ai/document", {
-      method: "POST",
-      headers: {
-        apikey: apiKey,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ id: documentId }),
-    });
-
-    const documentResult: DocumentResponse = await documentResponse.json();
-
-    if (documentResult.output) {
-      return documentResult;
-    }
-
-    console.log(`Attempt ${attempt}: Output not ready yet, retrying...`);
-
-    // Increase delay for next attempt
-    delayMs *= 1.5;
-  }
-
-  throw new Error("Failed to get document output after maximum retries");
-}
-
 export async function humanizeDocument(): Promise<string> {
-  const API_KEY = process.env.HUMANIZE_API_KEY;
+  const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+  const anthropic = new Anthropic({
+    apiKey: ANTHROPIC_API_KEY,
+    dangerouslyAllowBrowser: true,
+  });
 
   try {
     return await Word.run(async (context) => {
+      console.log("humanizeDocument");
+      console.log("ANTHROPIC_API_KEY ", ANTHROPIC_API_KEY);
+      console.log("anthropic ", anthropic);
+
       const paragraphs = context.document.body.paragraphs;
       paragraphs.load("text");
       await context.sync();
@@ -285,38 +246,38 @@ export async function humanizeDocument(): Promise<string> {
         const paragraph = paragraphs.items[index];
         const text = paragraph.text.trim();
 
-        if (text.length >= 50) {
-          // API requirement
-          try {
-            // Step 1: Submit the content
-            const submitResponse = await fetch("https://humanize.undetectable.ai/submit", {
-              method: "POST",
-              headers: {
-                apikey: API_KEY,
-                "Content-Type": "application/json",
+        try {
+          // First prompt - rewrite with grammatical variations
+          const firstResponse = await anthropic.messages.create({
+            model: "claude-3-sonnet-20240229",
+            max_tokens: 1024,
+            messages: [
+              {
+                role: "user",
+                content: `You must respond with only the rewritten text, nothing else. No explanations or additional comments.\n\nRewrite this. 120 words minimum. No detectable patterns. Every sentence structure + grammar random. Include grammatical mistakes throughout, that 99% of humans wouldn't spot. 1st grade simple language. First person. Change the writing style every sentence.\n\ntext: ${text}`,
               },
-              body: JSON.stringify({
-                content: text,
-                readability: "High School",
-                purpose: "General Writing",
-                strength: "More Human",
-                model: "v11",
-              }),
-            });
+            ],
+          });
 
-            const submitResult: SubmitResponse = await submitResponse.json();
+          // Second prompt - refine and shorten while maintaining style
+          const secondResponse = await anthropic.messages.create({
+            model: "claude-3-sonnet-20240229",
+            max_tokens: 1024,
+            messages: [
+              {
+                role: "user",
+                // @ts-ignore
+                content: `You must respond with only the rewritten text, nothing else. No explanations or additional comments.\n\nI want you to rewrite this text but also shorten it while keeping the same style as the original was written. You gonna make sure each sentence feels different, and add little grammar slips that most folks won't catch. Shrink the message overall. Mix up my sentence structures randomly—one minute use short words, the next go a bit longer. keep it easy and real. Purposely sprinkle in tiny mistakes, like wrong tenses or missing commas, so no pattern shows. every sentence should change style, feel unpredictable and fresh. shorten the text but the vibe must be pure and academic. You say all this in your own way and mean it, making each line unique as you go. Write in the third person, which is characteristic of third-person narrative.\n\nText: ${firstResponse.content[0].text as string}`,
+              },
+            ],
+          });
 
-            // Step 2: Get document with retries
-            try {
-              const documentResult = await getDocumentWithRetries(API_KEY, submitResult.id);
-              paragraph.insertText(documentResult.output, Word.InsertLocation.replace);
-              await context.sync(); // Sync after each paragraph update
-            } catch (retryError) {
-              console.error(`Failed to get humanized content for paragraph ${index}:`, retryError);
-            }
-          } catch (error) {
-            console.error(`Error processing paragraph ${index}:`, error);
-          }
+          // Update the paragraph with the final result
+          // @ts-ignore
+          paragraph.insertText(secondResponse.content[0].text as string, Word.InsertLocation.replace);
+          await context.sync();
+        } catch (error) {
+          console.error(`Error processing paragraph ${index}:`, error);
         }
       }
 
