@@ -249,8 +249,9 @@ export async function humanizeDocument(): Promise<string> {
         try {
           // First prompt - rewrite with grammatical variations
           const firstResponse = await anthropic.messages.create({
-            model: "claude-3-sonnet-20240229",
+            model: "claude-3-sonnet",
             max_tokens: 1024,
+
             messages: [
               {
                 role: "user",
@@ -261,7 +262,7 @@ export async function humanizeDocument(): Promise<string> {
 
           // Second prompt - refine and shorten while maintaining style
           const secondResponse = await anthropic.messages.create({
-            model: "claude-3-sonnet-20240229",
+            model: "claude-3-sonnet",
             max_tokens: 1024,
             messages: [
               {
