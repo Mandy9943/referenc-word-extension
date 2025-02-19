@@ -157,15 +157,15 @@ export async function removeReferences(): Promise<string> {
       // Updated citation patterns to be more precise
       const citationPatterns = [
         // Multiple authors with 'and' and commas - non-greedy match
-        /\((?:[^,()]+(,\s[^,()]+)*(?:,\sand\s[^,()]+)?)[,\s]\s?\d{4}\)/g, // (Author, Author, and Author, 2024) or (Author, Author, and Author 2024)
+        /\((?:[^,()]+(,\s[^,()]+)*(?:,\sand\s[^,()]+)?)[,\s]\s?\d{4}[a-z]?\)/g, // Added [a-z]? to handle letter suffixes
 
         // Standard patterns - non-greedy match
-        /\((?:[^,()]+)[,\s]\s?\d{4}\)/g, // (Author, 2024) or (Author 2024)
-        /\((?:[^()]+\sand\s[^,()]+)[,\s]\s?\d{4}\)/g, // (Author and Author, 2024) or (Author and Author 2024)
-        /\((?:[^()]+)\set\sal\.?[,\s]\s?\d{4}\)/g, // (Author et al., 2024) or (Author et al 2024)
+        /\((?:[^,()]+)[,\s]\s?\d{4}[a-z]?\)/g, // Added [a-z]? to handle letter suffixes
+        /\((?:[^()]+\sand\s[^,()]+)[,\s]\s?\d{4}[a-z]?\)/g, // Added [a-z]? to handle letter suffixes
+        /\((?:[^()]+)\set\sal\.?[,\s]\s?\d{4}[a-z]?\)/g, // Added [a-z]? to handle letter suffixes
 
         // Additional patterns for edge cases - non-greedy match
-        /\((?:[^,()]+(,\s[^,()]+)*)[,\s]\s?\d{4}\)/g, // (Author, Author, Author, 2024) or (Author, Author, Author 2024)
+        /\((?:[^,()]+(,\s[^,()]+)*)[,\s]\s?\d{4}[a-z]?\)/g, // Added [a-z]? to handle letter suffixes
       ];
 
       let totalRemoved = 0;
