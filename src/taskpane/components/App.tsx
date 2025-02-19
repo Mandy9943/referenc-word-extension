@@ -1,6 +1,6 @@
 import { Button, makeStyles, Text, tokens } from "@fluentui/react-components";
 import * as React from "react";
-import { analyzeDocument, humanizeDocument, removeReferences } from "../word";
+import { analyzeDocument, humanizeDocument, removeReferences } from "../taskpane";
 
 const useStyles = makeStyles({
   root: {
@@ -64,6 +64,13 @@ type Status = "idle" | "loading" | "success" | "error";
 const App: React.FC = () => {
   const styles = useStyles();
   const [status, setStatus] = React.useState<Status>("idle");
+  const [isValidHost, setIsValidHost] = React.useState(false);
+
+  React.useEffect(() => {
+    Office.onReady((info) => {
+      setIsValidHost(info.host === Office.HostType.Word || info.host === Office.HostType.PowerPoint);
+    });
+  }, []);
 
   const handleAnalyzeDocument = async () => {
     setStatus("loading");
@@ -129,31 +136,39 @@ const App: React.FC = () => {
     <div className={styles.root}>
       <div className={styles.buttonContainer}>
         <Text className={styles.title}>Reference Manager</Text>
-        <Button
-          appearance="secondary"
-          onClick={handleRemoveReferences}
-          disabled={status === "loading"}
-          className={styles.button}
-        >
-          Remove References
-        </Button>
-        <Button
-          appearance="primary"
-          onClick={handleAnalyzeDocument}
-          disabled={status === "loading"}
-          className={styles.button}
-        >
-          Add References
-        </Button>
-        <Button
-          appearance="primary"
-          onClick={handleHumanizeDocument}
-          disabled={status === "loading"}
-          className={styles.button}
-        >
-          Humanize Text
-        </Button>
-        gemini v1.3
+        {isValidHost ? (
+          <>
+            <Button
+              appearance="secondary"
+              onClick={handleRemoveReferences}
+              disabled={status === "loading"}
+              className={styles.button}
+            >
+              Remove References
+            </Button>
+            <Button
+              appearance="primary"
+              onClick={handleAnalyzeDocument}
+              disabled={status === "loading"}
+              className={styles.button}
+            >
+              Add References
+            </Button>
+            <Button
+              appearance="primary"
+              onClick={handleHumanizeDocument}
+              disabled={status === "loading"}
+              className={styles.button}
+            >
+              Humanize Text
+            </Button>
+          </>
+        ) : (
+          <Text>
+            This add-in is optimized for Word and PowerPoint. Some features may not be available in other applications.
+          </Text>
+        )}
+        gemini v1.4
         {getStatusDisplay()}
       </div>
     </div>

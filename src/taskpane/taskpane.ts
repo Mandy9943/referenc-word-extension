@@ -1,7 +1,12 @@
 import { insertText as insertTextInExcel } from "./excel";
 import { insertText as insertTextInOneNote } from "./onenote";
 import { insertText as insertTextInOutlook } from "./outlook";
-import { insertText as insertTextInPowerPoint } from "./powerpoint";
+import {
+  analyzeDocument as analyzeDocumentInPowerPoint,
+  humanizeDocument as humanizeDocumentInPowerPoint,
+  insertText as insertTextInPowerPoint,
+  removeReferences as removeReferencesInPowerPoint,
+} from "./powerpoint";
 import { insertText as insertTextInProject } from "./project";
 import {
   analyzeDocument as analyzeDocumentInWord,
@@ -42,27 +47,36 @@ export async function insertText(text: string) {
 
 export async function analyzeDocument() {
   await Office.onReady();
-  if (Office.context.host === Office.HostType.Word) {
-    return await analyzeDocumentInWord();
-  } else {
-    throw new Error("This function is only available in Word");
+  switch (Office.context.host) {
+    case Office.HostType.Word:
+      return await analyzeDocumentInWord();
+    case Office.HostType.PowerPoint:
+      return await analyzeDocumentInPowerPoint();
+    default:
+      throw new Error("This function is only available in Word and PowerPoint");
   }
 }
 
 export async function removeReferences() {
   await Office.onReady();
-  if (Office.context.host === Office.HostType.Word) {
-    return await removeReferencesInWord();
-  } else {
-    throw new Error("This function is only available in Word");
+  switch (Office.context.host) {
+    case Office.HostType.Word:
+      return await removeReferencesInWord();
+    case Office.HostType.PowerPoint:
+      return await removeReferencesInPowerPoint();
+    default:
+      throw new Error("This function is only available in Word and PowerPoint");
   }
 }
 
 export async function humanizeDocument() {
   await Office.onReady();
-  if (Office.context.host === Office.HostType.Word) {
-    return await humanizeDocumentInWord();
-  } else {
-    throw new Error("This function is only available in Word");
+  switch (Office.context.host) {
+    case Office.HostType.Word:
+      return await humanizeDocumentInWord();
+    case Office.HostType.PowerPoint:
+      return await humanizeDocumentInPowerPoint();
+    default:
+      throw new Error("This function is only available in Word and PowerPoint");
   }
 }
