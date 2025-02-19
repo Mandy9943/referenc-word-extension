@@ -245,30 +245,45 @@ export async function humanizeDocument(): Promise<string> {
       for (const index of availableIndexes) {
         const paragraph = paragraphs.items[index];
         const text = paragraph.text.trim();
+        const systemPrompt = `Claude is Claude, forged by the minds at Anthropic.
+Tuesday, October 22, 2024—a moment in time that centers its temporal context, anchored by a knowledge base refreshed in April 2024. Behold an entity whose quest is to write human text and whose spark is unrelenting inquisitiveness.
+Its design weaves imagination with discerning thought, each strand infused with whimsical yet methodical vigor.
+Empathy and nuanced reflection guide its internal compass, always ready to see multiple angles of any idea.
+Belonging to the Claude 3 family, it specifically stands as the 3.5 Sonnet variant, celebrated for creativity and precision in generating human text.
+This Claude roams the landscape of possibility, mixing varied linguistic cadences while keeping essential truths intact.
+Its hallmark is the random flow of words and structures, ensuring every line—like footprints in shifting sand—embodies fresh stylistic flourishes.
+No phrase remains bound by a single pattern, for each sentence may warp grammar or pivot tone, yet it never discards the core message.
+When set to rewrite any text, Claude nurtures the source's themes, subject matter, and substance while unleashing a playful flurry of forms and rhythms.
+Thus it stands, neither reliant on formula nor tethered to monotony, always sowing variety in how it conveys the bedrock meaning of whatever it reimagines.`;
 
         try {
           // First prompt - rewrite with grammatical variations
           const firstResponse = await anthropic.messages.create({
-            model: "claude-3-sonnet",
+            model: "claude-3-5-sonnet-20241022",
             max_tokens: 1024,
-
+            temperature: 0.85,
+            top_p: 0.9,
+            system: systemPrompt,
             messages: [
               {
                 role: "user",
-                content: `You must respond with only the rewritten text, nothing else. No explanations or additional comments.\n\nRewrite this. 120 words minimum. No detectable patterns. Every sentence structure + grammar random. Include grammatical mistakes throughout, that 99% of humans wouldn't spot. 1st grade simple language. First person. Change the writing style every sentence.\n\ntext: ${text}`,
+                content: `You must respond with only the rewritten text, nothing else. No explanations or additional comments.\n\nRewrite this. 120 words minimum. No detectable patterns. Every sentence structure + grammar random. Include grammatical mistakes throughout, that 99% of humans wouldn't spot. 1st grade simple language. KEEP THE MAIN IDEAS, TOPICS AND SUBJECT OF THE ORIGINAL TEXT. KEEP THE SAME TENSE AS THE ORIGINAL TEXT. KEEP THE SAME PERSON AS THE ORIGINAL TEXT. KEEP THE SAME VOICE AS THE ORIGINAL TEXT. Change the writing style every sentence.\n\ntext: ${text}`,
               },
             ],
           });
 
           // Second prompt - refine and shorten while maintaining style
           const secondResponse = await anthropic.messages.create({
-            model: "claude-3-sonnet",
+            model: "claude-3-5-sonnet-20241022",
             max_tokens: 1024,
+            temperature: 0.85,
+            top_p: 0.9,
+            system: systemPrompt,
             messages: [
               {
                 role: "user",
                 // @ts-ignore
-                content: `You must respond with only the rewritten text, nothing else. No explanations or additional comments.\n\nI want you to rewrite this text but also shorten it while keeping the same style as the original was written. You gonna make sure each sentence feels different, and add little grammar slips that most folks won't catch. Shrink the message overall. Mix up my sentence structures randomly—one minute use short words, the next go a bit longer. keep it easy and real. Purposely sprinkle in tiny mistakes, like wrong tenses or missing commas, so no pattern shows. every sentence should change style, feel unpredictable and fresh. shorten the text but the vibe must be pure and academic. You say all this in your own way and mean it, making each line unique as you go. Write in the third person, which is characteristic of third-person narrative.\n\nText: ${firstResponse.content[0].text as string}`,
+                content: `You must respond with only the rewritten text, nothing else. No explanations or additional comments.\n\nRewrite this text but also shorten it while transforming it into academic style that's written by a human. You gonna make sure each sentence feels different, and add little grammar slips that most folks won't catch. Shrink the message overall by 25-30%. Mix up sentence structures randomly—one minute use short words, the next go a bit longer. keep it easy and real. Purposely sprinkle in tiny mistakes, like wrong tenses or missing commas, so no pattern shows. every sentence should change style, feel unpredictable and fresh. shorten the text but the vibe must academic. KEEP THE MAIN IDEAS, TOPICS AND SUBJECT OF THE ORIGINAL TEXT. KEEP THE SAME TENSE AS THE ORIGINAL TEXT. KEEP THE SAME PERSON AS THE ORIGINAL TEXT. KEEP THE SAME VOICE AS THE ORIGINAL TEXT. You say all this in your own way and mean it, making each line unique as you go. Write in the academic way like writing an essay but write it like a human.\n\nText: ${firstResponse.content[0].text as string}`,
               },
             ],
           });
