@@ -245,52 +245,68 @@ export async function humanizeDocument(): Promise<string> {
       for (const index of availableIndexes) {
         const paragraph = paragraphs.items[index];
         const text = paragraph.text.trim();
-        const systemPrompt = `Claude is Claude, forged by the minds at Anthropic.
-Tuesday, October 22, 2024—a moment in time that centers its temporal context, anchored by a knowledge base refreshed in April 2024. Behold an entity whose quest is to write human text and whose spark is unrelenting inquisitiveness.
-Its design weaves imagination with discerning thought, each strand infused with whimsical yet methodical vigor.
-Empathy and nuanced reflection guide its internal compass, always ready to see multiple angles of any idea.
-Belonging to the Claude 3 family, it specifically stands as the 3.5 Sonnet variant, celebrated for creativity and precision in generating human text.
-This Claude roams the landscape of possibility, mixing varied linguistic cadences while keeping essential truths intact.
-Its hallmark is the random flow of words and structures, ensuring every line—like footprints in shifting sand—embodies fresh stylistic flourishes.
-No phrase remains bound by a single pattern, for each sentence may warp grammar or pivot tone, yet it never discards the core message.
-When set to rewrite any text, Claude nurtures the source's themes, subject matter, and substance while unleashing a playful flurry of forms and rhythms.
-Thus it stands, neither reliant on formula nor tethered to monotony, always sowing variety in how it conveys the bedrock meaning of whatever it reimagines.`;
 
         try {
           // First prompt - rewrite with grammatical variations
-          const firstResponse = await anthropic.messages.create({
+          const msg = await anthropic.messages.create({
             model: "claude-3-5-sonnet-20241022",
-            max_tokens: 1024,
-            temperature: 0.85,
-            top_p: 0.9,
-            system: systemPrompt,
+            max_tokens: 8192,
+            temperature: 1,
+            system: `Claude is Claude, created by Anthropic.\nClaude’s knowledge base was 
+            last updated on April 2024. You are an AI for rewriting texts. When you get a text, 
+            rewrite it. Ensure the new version is at least 120 words but shorter than the original. 
+            Each sentence should have its own structure and grammar way. Include small grammatical 
+            mistakes that are hard to notice. Use words so simple, like a first-grader uses. 
+            Keep the main ideas and topics same. Stick to the same tense, person, and voice as 
+            the original. Write each sentence in a different way, making them unique. Sprinkle 
+            in little grammar slips that folks hardly notice. Mix short and long sentences randomly. 
+            Keep it easy. Put in errors, maybe wrong tense or no comma where needed. 
+            Ensure sentences feel fresh and unpredictable. Shrink the text by about a quarter to a 
+            third. Blend essay style with casual talk.\n\nYou sometimes write in American English 
+            and other times in English (UK) in the same paragraph. The user’s request revolve around 
+            forging a condensed text that stays above 120 words and preserves all crucial subjects, 
+            no matter what. Some lines must appear short, then others might wander longer. Keep tense 
+            and viewpoint consistent, see, but jumbles grammar a little bit, so folks rarely notice. 
+            Also, you gotta slip in random punctuation, maybe skip some commas. Main concepts must 
+            remain intact: you trim fluff by about a quarter, you keep kid-friendly words, you vary 
+            each line’s style, and you ensure no pattern emerges. Claude strives to scramble structures 
+            unpredictably—some grammar slip-ups here, some missing letter there. Go gentle, but keep that 
+            text fresh. The user specifically wants an overall simpler approach. Each sentence changes 
+            style, so it feels lively. We does it with best ability. This is the user’s instructions, 
+            and Claude must abide. You sometimes write little grammar errors and other times you write 
+            the correct way in the same paragraph.`,
             messages: [
               {
                 role: "user",
-                content: `You must respond with only the rewritten text, nothing else. No explanations or additional comments.\n\nRewrite this. 120 words minimum. No detectable patterns. Every sentence structure + grammar random. Include grammatical mistakes throughout, that 99% of humans wouldn't spot. 1st grade simple language. KEEP THE MAIN IDEAS, TOPICS AND SUBJECT OF THE ORIGINAL TEXT. KEEP THE SAME TENSE AS THE ORIGINAL TEXT. KEEP THE SAME PERSON AS THE ORIGINAL TEXT. KEEP THE SAME VOICE AS THE ORIGINAL TEXT. Change the writing style every sentence.\n\ntext: ${text}`,
+                content: [
+                  {
+                    type: "text",
+                    text: `English (US). Rewrite this using English (US) but also shorten it. 120 words minimum. 
+                    No detectable patterns. Every sentence structure + grammar random. Include grammatical mistakes 
+                    throughout that 99% of humans wouldn\'t spot. 1st grade simple language. KEEP THE MAIN IDEAS, 
+                    TOPICS AND SUBJECT OF THE ORIGINAL TEXT. KEEP THE SAME TENSE AS THE ORIGINAL TEXT. KEEP THE SAME 
+                    PERSON AS THE ORIGINAL TEXT. KEEP THE SAME VOICE AS THE ORIGINAL TEXT. Change the writing style 
+                    every sentence. You say all this in your own way and mean it, making each line unique as you go. 
+                    You gonna make sure each sentence feels different, and add little grammar slips that most folks 
+                    won’t catch. You gonna make sure each sentence feels different, and add little grammar slips 
+                    that most folks won’t catch. Mix up sentence structures randomly—one minute use short words, 
+                    the next go a bit longer. keep it easy and real. Purposely sprinkle in tiny mistakes, like wrong 
+                    tenses or missing commas, so no pattern shows. every sentence should change style, feel 
+                    unpredictable and fresh. Shrink the message overall by 25-30%. With this in mind please output a text 
+                    that blends essay writing with normal writing while respecting the same tense, person, and voice 
+                    of the original text. English (UK). \n\nYou sometimes write English (UK) in the same 
+                    paragraph.\n\nTHE OUTPUTS SHOULD BE IN THE FORMAT OF 1-2 PARAGRAPHS MAXIMUM.\n\nDON\'T WRITE ANY 
+                    QUESTIONS LIKE "Ya know what" OR ANY OTHER KIND OF QUESTION IN THE OUTPUT.\n\nNever say something 
+                    like "Here\'s a mixed US/UK version with intentional subtle variations" or [Note:...] in the output.
+                    \n\n${text} `,
+                  },
+                ],
               },
             ],
           });
-
-          // Second prompt - refine and shorten while maintaining style
-          const secondResponse = await anthropic.messages.create({
-            model: "claude-3-5-sonnet-20241022",
-            max_tokens: 1024,
-            temperature: 0.85,
-            top_p: 0.9,
-            system: systemPrompt,
-            messages: [
-              {
-                role: "user",
-                // @ts-ignore
-                content: `You must respond with only the rewritten text, nothing else. No explanations or additional comments.\n\nRewrite this text but also shorten it while transforming it into academic style that's written by a human. You gonna make sure each sentence feels different, and add little grammar slips that most folks won't catch. Shrink the message overall by 25-30%. Mix up sentence structures randomly—one minute use short words, the next go a bit longer. keep it easy and real. Purposely sprinkle in tiny mistakes, like wrong tenses or missing commas, so no pattern shows. every sentence should change style, feel unpredictable and fresh. shorten the text but the vibe must academic. KEEP THE MAIN IDEAS, TOPICS AND SUBJECT OF THE ORIGINAL TEXT. KEEP THE SAME TENSE AS THE ORIGINAL TEXT. KEEP THE SAME PERSON AS THE ORIGINAL TEXT. KEEP THE SAME VOICE AS THE ORIGINAL TEXT. You say all this in your own way and mean it, making each line unique as you go. Write in the academic way like writing an essay but write it like a human.\n\nText: ${firstResponse.content[0].text as string}`,
-              },
-            ],
-          });
-
           // Update the paragraph with the final result
           // @ts-ignore
-          paragraph.insertText(secondResponse.content[0].text as string, Word.InsertLocation.replace);
+          paragraph.insertText(msg.content[0].text as string, Word.InsertLocation.replace);
           await context.sync();
         } catch (error) {
           console.error(`Error processing paragraph ${index}:`, error);

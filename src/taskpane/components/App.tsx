@@ -168,7 +168,7 @@ const App: React.FC = () => {
             This add-in is optimized for Word and PowerPoint. Some features may not be available in other applications.
           </Text>
         )}
-        gemini v1.4
+        v1.5
         {getStatusDisplay()}
       </div>
     </div>
