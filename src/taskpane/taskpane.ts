@@ -11,6 +11,7 @@ import { insertText as insertTextInProject } from "./project";
 import {
   analyzeDocument as analyzeDocumentInWord,
   humanizeDocument as humanizeDocumentInWord,
+  humanizeSelectedTextInWord,
   insertText as insertTextInWord,
   removeReferences as removeReferencesInWord,
 } from "./word";
@@ -78,5 +79,15 @@ export async function humanizeDocument() {
       return await humanizeDocumentInPowerPoint();
     default:
       throw new Error("This function is only available in Word and PowerPoint");
+  }
+}
+
+export async function humanizeSelectedText() {
+  await Office.onReady();
+  switch (Office.context.host) {
+    case Office.HostType.Word:
+      return await humanizeSelectedTextInWord();
+    default:
+      throw new Error("This function is only available in Word");
   }
 }

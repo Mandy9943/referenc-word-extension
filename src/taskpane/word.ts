@@ -337,3 +337,21 @@ export async function humanizeDocument(): Promise<string> {
     throw new Error(`Error humanizing document: ${error.message}`);
   }
 }
+
+export async function humanizeSelectedTextInWord(): Promise<string> {
+  try {
+    return await Word.run(async (context) => {
+      const selection = context.document.getSelection();
+      selection.load("text");
+      await context.sync();
+
+      const text = selection.text;
+      console.log({ text });
+
+      return "Text humanized successfully";
+    });
+  } catch (error) {
+    console.error("Error in humanizeSelectedText:", error);
+    throw new Error(`Error humanizing selected text: ${error.message}`);
+  }
+}

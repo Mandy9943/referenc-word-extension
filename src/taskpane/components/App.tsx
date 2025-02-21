@@ -1,6 +1,6 @@
 import { Button, makeStyles, Text, tokens } from "@fluentui/react-components";
 import * as React from "react";
-import { analyzeDocument, cancelHumanization, humanizeDocument, removeReferences } from "../taskpane";
+import { analyzeDocument, humanizeDocument, humanizeSelectedText, removeReferences } from "../taskpane";
 
 const useStyles = makeStyles({
   root: {
@@ -58,7 +58,7 @@ const useStyles = makeStyles({
     color: tokens.colorNeutralForeground3,
   },
   buttonGreen: {
-    backgroundColor: tokens.colorPaletteGreenBackground2,
+    backgroundColor: "#008000",
     color: tokens.colorNeutralForegroundOnBrand,
     "&:hover": {
       backgroundColor: tokens.colorPaletteGreenBackground1,
@@ -134,11 +134,23 @@ const App: React.FC = () => {
     }
   };
 
-  const handleStopHumanize = () => {
-    cancelHumanization();
-    setIsHumanizing(false);
-    setStatus("idle");
+  const handleHumanizeSelectedText = async () => {
+    setStatus("loading");
+    setIsHumanizing(true);
+    try {
+      await humanizeSelectedText();
+      setStatus("success");
+    } catch (error) {
+      setStatus("error");
+    } finally {
+      setIsHumanizing(false);
+    }
   };
+
+  // const handleStopHumanize = () => {
+  //   setIsHumanizing(false);
+  //   setStatus("idle");
+  // };
 
   const getStatusDisplay = () => {
     const baseClassName = `${styles.status} `;
@@ -163,7 +175,7 @@ const App: React.FC = () => {
         );
       default:
         return (
-          <div className={baseClassName + styles.statusIdle}>
+          <div>
             <Text>Ready to process</Text>
           </div>
         );
@@ -185,10 +197,10 @@ const App: React.FC = () => {
               Remove References
             </Button>
             <Button
-              appearance="primary"
               onClick={handleAnalyzeDocument}
               disabled={status === "loading"}
-              className={`${styles.button} ${styles.buttonGreen}`}
+              className={`${styles.button}`}
+              style={{ backgroundColor: "rgb(26 167 26)", color: "#fff" }}
             >
               Add References
             </Button>
@@ -200,22 +212,23 @@ const App: React.FC = () => {
             >
               Humanize All Text
             </Button>
-            {/* <Button
+            <Button
               appearance="primary"
-              onClick={handleHumanizeDocument}
+              onClick={handleHumanizeSelectedText}
               disabled={status === "loading"}
-              className={`${styles.button} ${styles.buttonYellow}`}
+              className={`${styles.button}`}
+              style={{ backgroundColor: "rgb(155 163 7)", color: "#fff" }}
             >
               Humanize Selected Text
-            </Button> */}
-            <Button
+            </Button>
+            {/* <Button
               appearance="primary"
               onClick={handleStopHumanize}
               disabled={!isHumanizing}
               className={`${styles.button} ${styles.buttonRed}`}
             >
               Stop Humanize Process
-            </Button>
+            </Button> */}
           </>
         ) : (
           <Text>
