@@ -1,6 +1,6 @@
 import { Button, makeStyles, Text, tokens } from "@fluentui/react-components";
 import * as React from "react";
-import { analyzeDocument, humanizeDocument, removeReferences } from "../taskpane";
+import { analyzeDocument, cancelHumanization, humanizeDocument, removeReferences } from "../taskpane";
 
 const useStyles = makeStyles({
   root: {
@@ -57,6 +57,34 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground3,
     color: tokens.colorNeutralForeground3,
   },
+  buttonGreen: {
+    backgroundColor: tokens.colorPaletteGreenBackground2,
+    color: tokens.colorNeutralForegroundOnBrand,
+    "&:hover": {
+      backgroundColor: tokens.colorPaletteGreenBackground1,
+    },
+  },
+  buttonBlue: {
+    backgroundColor: tokens.colorBrandBackground,
+    color: tokens.colorNeutralForegroundOnBrand,
+    "&:hover": {
+      backgroundColor: tokens.colorBrandBackgroundHover,
+    },
+  },
+  buttonYellow: {
+    backgroundColor: tokens.colorPaletteYellowBackground2,
+    color: tokens.colorNeutralForeground1,
+    "&:hover": {
+      backgroundColor: tokens.colorPaletteYellowBackground1,
+    },
+  },
+  buttonRed: {
+    backgroundColor: tokens.colorPaletteRedBackground2,
+    color: tokens.colorNeutralForegroundOnBrand,
+    "&:hover": {
+      backgroundColor: tokens.colorPaletteRedBackground1,
+    },
+  },
 });
 
 type Status = "idle" | "loading" | "success" | "error";
@@ -65,6 +93,7 @@ const App: React.FC = () => {
   const styles = useStyles();
   const [status, setStatus] = React.useState<Status>("idle");
   const [isValidHost, setIsValidHost] = React.useState(false);
+  const [isHumanizing, setIsHumanizing] = React.useState(false);
 
   React.useEffect(() => {
     Office.onReady((info) => {
@@ -94,12 +123,21 @@ const App: React.FC = () => {
 
   const handleHumanizeDocument = async () => {
     setStatus("loading");
+    setIsHumanizing(true);
     try {
       await humanizeDocument();
       setStatus("success");
     } catch (error) {
       setStatus("error");
+    } finally {
+      setIsHumanizing(false);
     }
+  };
+
+  const handleStopHumanize = () => {
+    cancelHumanization();
+    setIsHumanizing(false);
+    setStatus("idle");
   };
 
   const getStatusDisplay = () => {
@@ -135,7 +173,7 @@ const App: React.FC = () => {
   return (
     <div className={styles.root}>
       <div className={styles.buttonContainer}>
-        <Text className={styles.title}>Reference Manager</Text>
+        <Text className={styles.title}>Essay Manager</Text>
         {isValidHost ? (
           <>
             <Button
@@ -150,7 +188,7 @@ const App: React.FC = () => {
               appearance="primary"
               onClick={handleAnalyzeDocument}
               disabled={status === "loading"}
-              className={styles.button}
+              className={`${styles.button} ${styles.buttonGreen}`}
             >
               Add References
             </Button>
@@ -158,9 +196,25 @@ const App: React.FC = () => {
               appearance="primary"
               onClick={handleHumanizeDocument}
               disabled={status === "loading"}
-              className={styles.button}
+              className={`${styles.button} ${styles.buttonBlue}`}
             >
-              Humanize Text
+              Humanize All Text
+            </Button>
+            {/* <Button
+              appearance="primary"
+              onClick={handleHumanizeDocument}
+              disabled={status === "loading"}
+              className={`${styles.button} ${styles.buttonYellow}`}
+            >
+              Humanize Selected Text
+            </Button> */}
+            <Button
+              appearance="primary"
+              onClick={handleStopHumanize}
+              disabled={!isHumanizing}
+              className={`${styles.button} ${styles.buttonRed}`}
+            >
+              Stop Humanize Process
             </Button>
           </>
         ) : (
