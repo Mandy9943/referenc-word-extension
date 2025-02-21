@@ -211,24 +211,23 @@ const App: React.FC = () => {
             >
               Add References
             </Button>
-            <Button
+            {/* <Button
               appearance="primary"
               onClick={handleHumanizeDocument}
               disabled={status === "loading"}
               className={`${styles.button} ${styles.buttonBlue}`}
             >
               Humanize All Text
-            </Button>
+            </Button> */}
             <Button
               appearance="primary"
               onClick={handleHumanizeSelectedText}
               disabled={status === "loading"}
-              className={`${styles.button}`}
-              style={{ backgroundColor: "rgb(155 163 7)", color: "#fff" }}
+              className={`${styles.button} ${styles.buttonBlue}`}
             >
               Humanize Selected Text
             </Button>
-            <Button
+            {/* <Button
               appearance="primary"
               onClick={handleStopHumanize}
               disabled={!isHumanizing}
@@ -236,7 +235,7 @@ const App: React.FC = () => {
               style={{ backgroundColor: "rgb(255 10 10)", color: "#fff" }}
             >
               Stop Humanize Process
-            </Button>
+            </Button> */}
           </>
         ) : (
           <Text>
