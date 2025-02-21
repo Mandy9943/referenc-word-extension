@@ -1,6 +1,12 @@
 import { Button, makeStyles, Text, tokens } from "@fluentui/react-components";
 import * as React from "react";
-import { analyzeDocument, humanizeDocument, humanizeSelectedText, removeReferences } from "../taskpane";
+import {
+  analyzeDocument,
+  humanizeDocument,
+  humanizeSelectedText,
+  removeReferences,
+  stopHumanizeProcess,
+} from "../taskpane";
 
 const useStyles = makeStyles({
   root: {
@@ -147,10 +153,11 @@ const App: React.FC = () => {
     }
   };
 
-  // const handleStopHumanize = () => {
-  //   setIsHumanizing(false);
-  //   setStatus("idle");
-  // };
+  const handleStopHumanize = () => {
+    stopHumanizeProcess();
+    setIsHumanizing(false);
+    setStatus("idle");
+  };
 
   const getStatusDisplay = () => {
     const baseClassName = `${styles.status} `;
@@ -221,14 +228,15 @@ const App: React.FC = () => {
             >
               Humanize Selected Text
             </Button>
-            {/* <Button
+            <Button
               appearance="primary"
               onClick={handleStopHumanize}
               disabled={!isHumanizing}
-              className={`${styles.button} ${styles.buttonRed}`}
+              className={`${styles.button}`}
+              style={{ backgroundColor: "rgb(255 10 10)", color: "#fff" }}
             >
               Stop Humanize Process
-            </Button> */}
+            </Button>
           </>
         ) : (
           <Text>

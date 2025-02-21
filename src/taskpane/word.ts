@@ -2,6 +2,20 @@
 import { Anthropic } from "@anthropic-ai/sdk";
 import { getFormattedReferences } from "./gemini";
 
+// Add a cancellation flag and helper methods
+let isHumanizeCancelled = false;
+
+export function requestCancelHumanize() {
+  isHumanizeCancelled = true;
+}
+
+export function resetHumanizeCancelState() {
+  isHumanizeCancelled = false;
+}
+
+/**
+ * Insert a simple text
+ */
 export async function insertText(text: string) {
   // Write text to the document.
   try {
@@ -255,6 +269,9 @@ const prompt = (text) => `English (US). Rewrite this using English (US) but also
                       like "Here's a mixed US/UK version with intentional subtle variations" or [Note:...] in the output.
                       \n\n${text} `;
 
+/**
+ * Humanize entire document
+ */
 export async function humanizeDocument(): Promise<string> {
   const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
   const anthropic = new Anthropic({
@@ -263,6 +280,9 @@ export async function humanizeDocument(): Promise<string> {
   });
 
   try {
+    // Before starting, reset the cancel state
+    resetHumanizeCancelState();
+
     return await Word.run(async (context) => {
       console.log("humanizeDocument");
       console.log("ANTHROPIC_API_KEY ", ANTHROPIC_API_KEY);
@@ -287,6 +307,11 @@ export async function humanizeDocument(): Promise<string> {
       const results: { index: number; text: string }[] = [];
 
       for (let i = 0; i < availableIndexes.length; i += batchSize) {
+        // If the user has requested cancellation, stop immediately
+        if (isHumanizeCancelled) {
+          throw new Error("Humanize process was cancelled by the user.");
+        }
+
         const batch = availableIndexes.slice(i, i + batchSize);
         const batchPromises = batch.map(async (index) => {
           const text = paragraphTexts[index].trim();
@@ -336,6 +361,9 @@ export async function humanizeDocument(): Promise<string> {
   }
 }
 
+/**
+ * Humanize selected text
+ */
 export async function humanizeSelectedTextInWord(): Promise<string> {
   const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
   const anthropic = new Anthropic({
@@ -344,6 +372,9 @@ export async function humanizeSelectedTextInWord(): Promise<string> {
   });
 
   try {
+    // Before starting, reset the cancel state
+    resetHumanizeCancelState();
+
     return await Word.run(async (context) => {
       // Get the selected range
       const selection = context.document.getSelection();
@@ -362,6 +393,11 @@ export async function humanizeSelectedTextInWord(): Promise<string> {
       const results: { index: number; text: string }[] = [];
 
       for (let i = 0; i < paragraphTexts.length; i += batchSize) {
+        // If the user has requested cancellation, stop immediately
+        if (isHumanizeCancelled) {
+          throw new Error("Humanize process was cancelled by the user.");
+        }
+
         const batch = paragraphTexts.slice(i, i + batchSize);
         const batchPromises = batch.map(async (text, batchIndex) => {
           const index = i + batchIndex;

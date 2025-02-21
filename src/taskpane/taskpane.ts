@@ -14,6 +14,7 @@ import {
   humanizeSelectedTextInWord,
   insertText as insertTextInWord,
   removeReferences as removeReferencesInWord,
+  requestCancelHumanize,
 } from "./word";
 
 /* global Office */
@@ -90,4 +91,12 @@ export async function humanizeSelectedText() {
     default:
       throw new Error("This function is only available in Word");
   }
+}
+
+/**
+ * Synchronously stops the in-progress "humanize" operation in Word.
+ */
+export function stopHumanizeProcess() {
+  // This will trigger the cancel logic in "word.ts"
+  requestCancelHumanize();
 }
