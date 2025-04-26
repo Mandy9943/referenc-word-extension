@@ -1,4 +1,4 @@
-import { Button, makeStyles, Text, tokens } from "@fluentui/react-components";
+import { Button, Checkbox, makeStyles, Text, tokens } from "@fluentui/react-components";
 import * as React from "react";
 import {
   analyzeDocument,
@@ -100,6 +100,7 @@ const App: React.FC = () => {
   const [status, setStatus] = React.useState<Status>("idle");
   const [isValidHost, setIsValidHost] = React.useState(false);
   const [isHumanizing, setIsHumanizing] = React.useState(false);
+  const [insertEveryOther, setInsertEveryOther] = React.useState(false);
 
   React.useEffect(() => {
     Office.onReady((info) => {
@@ -110,7 +111,8 @@ const App: React.FC = () => {
   const handleAnalyzeDocument = async () => {
     setStatus("loading");
     try {
-      await analyzeDocument();
+      // @ts-ignore
+      await analyzeDocument(insertEveryOther);
       setStatus("success");
     } catch (error) {
       setStatus("error");
@@ -203,6 +205,15 @@ const App: React.FC = () => {
             >
               Remove References
             </Button>
+            <div
+              style={{ display: "flex", alignItems: "center", marginBottom: "10px", width: "100%", maxWidth: "300px" }}
+            >
+              <Checkbox
+                checked={insertEveryOther}
+                onChange={(_e, data) => setInsertEveryOther(data.checked === true)}
+                label="Insert references every other paragraph"
+              />
+            </div>
             <Button
               onClick={handleAnalyzeDocument}
               disabled={status === "loading"}

@@ -29,7 +29,7 @@ export async function insertText(text: string) {
   }
 }
 
-export async function analyzeDocument(): Promise<string> {
+export async function analyzeDocument(insertEveryOther: boolean = false): Promise<string> {
   try {
     return await Word.run(async (context) => {
       // Get all paragraphs from the document
@@ -109,8 +109,17 @@ export async function analyzeDocument(): Promise<string> {
 
       console.log({ availableIndexes });
 
+      // If insertEveryOther is true, only use every other paragraph
+      let targetIndexes = [...availableIndexes];
+      if (insertEveryOther && availableIndexes.length > 0) {
+        // Sort available indexes to ensure we're working with ordered paragraphs
+        targetIndexes.sort((a, b) => a - b);
+        // Filter to only include every other paragraph
+        targetIndexes = targetIndexes.filter((_, i) => i % 2 === 0);
+      }
+
       // Shuffle available indexes
-      const randomIndex = [...availableIndexes].sort(() => Math.random() - 0.5);
+      const randomIndex = [...targetIndexes].sort(() => Math.random() - 0.5);
 
       // Insert references
       const usedReferences = new Set<number>();
@@ -234,7 +243,7 @@ const prompt = (
 
 Output should be slightly bigger than the original text. 
 
-Change the writing style every sentence. You say all this in your own way and mean it, making each line unique as you go. You gonna make sure each sentence feels different. Mix up sentence structures randomly—one minute use short words, the next go a bit longer. Keep it easy and real. Purposely sprinkle in tiny mistakes, like dont instead of don’t / its instead if it’s or missing commas, so no pattern shows. every sentence should change style, feel unpredictable and fresh. 
+Change the writing style every sentence. You say all this in your own way and mean it, making each line unique as you go. You gonna make sure each sentence feels different. Mix up sentence structures randomly—one minute use short words, the next go a bit longer. Keep it easy and real. Purposely sprinkle in tiny mistakes, like dont instead of don't / its instead if it's or missing commas, so no pattern shows. every sentence should change style, feel unpredictable and fresh. 
 
 With this in mind please output a text that blends essay writing with normal writing while respecting the same tense, person, and voice of the original text. 
 
