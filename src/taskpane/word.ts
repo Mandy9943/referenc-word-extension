@@ -93,10 +93,22 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
       );
       console.log({ lastReferenceListIndex });
 
-      // Filter out short paragraphs and those ending with ":"
+      // Filter out short paragraphs, TOC lines, and those ending with ":"
+      const isTOCLine = (text: string): boolean => {
+        const trimmed = text.trim();
+        if (!trimmed) return false;
+        // Lines with dot leaders followed by a page number, e.g. "Heading ..... 3"
+        const dotLeaderWithPage = /\.{5,}.*\d+\s*$/.test(trimmed);
+        // Lines containing tab characters (commonly used in TOC)
+        const hasTab = /\t/.test(trimmed);
+        return dotLeaderWithPage || hasTab;
+      };
+
       const excludeIndexes = paragraphTexts
         .map((para, index) =>
-          para.endsWith(": ") || para.split(" ").length <= 11 || index > lastReferenceListIndex ? index : -1
+          para.endsWith(": ") || para.split(/\s+/).length <= 11 || index > lastReferenceListIndex || isTOCLine(para)
+            ? index
+            : -1
         )
         .filter((index) => index !== -1);
 
