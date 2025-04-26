@@ -47,11 +47,11 @@ export async function insertText(text: string) {
   });
 }
 
-export async function analyzeDocument() {
+export async function analyzeDocument(insertEveryOther: boolean = false) {
   await Office.onReady();
   switch (Office.context.host) {
     case Office.HostType.Word:
-      return await analyzeDocumentInWord();
+      return await analyzeDocumentInWord(insertEveryOther);
     case Office.HostType.PowerPoint:
       return await analyzeDocumentInPowerPoint();
     default:
