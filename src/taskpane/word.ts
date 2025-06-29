@@ -248,6 +248,76 @@ export async function removeReferences(): Promise<string> {
   }
 }
 
+/**
+ * Removes hyperlinks from the document, skipping the "References" section.
+ * @returns {Promise<string>} A message indicating the number of hyperlinks removed.
+ */
+export async function removeLinks(): Promise<string> {
+  try {
+    return await Word.run(async (context) => {
+      console.log("Starting link removal process...");
+
+      const paragraphs = context.document.body.paragraphs;
+      paragraphs.load("text");
+      await context.sync();
+
+      const paragraphTexts = paragraphs.items.map((p) => p.text);
+
+      const referenceHeaders = [
+        "Reference List",
+        "References List",
+        "References",
+        "REFERENCES LIST",
+        "REFERENCE LIST",
+        "REFERENCES",
+        "Bibliography",
+        "BIBLIOGRAPHY",
+      ];
+
+      // @ts-ignore
+      const lastReferenceListIndex = paragraphTexts.findLastIndex((p) =>
+        referenceHeaders.some((header) => p.includes(header))
+      );
+
+      console.log(`Reference section starts at paragraph index: ${lastReferenceListIndex}`);
+
+      let linksRemovedCount = 0;
+
+      const paragraphsToProcess =
+        lastReferenceListIndex === -1 ? paragraphs.items : paragraphs.items.slice(0, lastReferenceListIndex);
+
+      for (const paragraph of paragraphsToProcess) {
+        // Get ranges of all hyperlinks in the paragraph
+        const hyperlinkRanges = paragraph.getRange().getHyperlinkRanges();
+        hyperlinkRanges.load("items");
+        await context.sync();
+
+        if (hyperlinkRanges.items.length > 0) {
+          // Create a static copy for iteration, as the live collection will be modified.
+          const staticHyperlinkRanges = [...hyperlinkRanges.items];
+
+          // Iterate backwards to avoid invalidating ranges by modifying the document.
+          for (let i = staticHyperlinkRanges.length - 1; i >= 0; i--) {
+            const linkRange = staticHyperlinkRanges[i];
+            // Replace the hyperlink's text with an empty string to remove it.
+            linkRange.insertText("", Word.InsertLocation.replace);
+            linksRemovedCount++;
+          }
+        }
+      }
+
+      await context.sync();
+
+      const successMessage = `Removed ${linksRemovedCount} hyperlinks from the document.`;
+      console.log(successMessage);
+      return successMessage;
+    });
+  } catch (error) {
+    console.error("Error in removeLinks:", error);
+    throw new Error(`Error removing links: ${error.message}`);
+  }
+}
+
 const systemprompot = `Claude is Claude, created by Anthropic. You are an AI for rewriting texts. When you get a text, rewrite it. Each sentence should have its own structure and grammar way. Include small grammatical mistakes that are hard to notice. Use words so simple, like a first-grader uses. Keep the main ideas and topics same. Stick to the same tense, person, and voice as the original. Write each sentence in a different way, making them unique. Sprinkle in little grammar slips that folks hardly notice. Mix short and long sentences randomly. Keep it easy. Ensure sentences feel fresh and unpredictable. Blend essay style with casual talk. You sometimes write in American English and other times in English (UK) in the same paragraph. Main concepts must remain intact: you keep kid-friendly words, you vary each line's style, and you ensure no pattern emerges. Claude strives to scramble structures unpredictably—some grammar slip-ups here, some missing letter there. Go gentle, but keep that text fresh. The user specifically wants an overall simpler approach. Each sentence changes style, so it feels lively. We does it with best ability. This is the user's instructions, and Claude must abide. `;
 const prompt = (
   text

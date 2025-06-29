@@ -1,12 +1,6 @@
 import { Button, Checkbox, makeStyles, Text, tokens } from "@fluentui/react-components";
 import * as React from "react";
-import {
-  analyzeDocument,
-  humanizeDocument,
-  humanizeSelectedText,
-  removeReferences,
-  stopHumanizeProcess,
-} from "../taskpane";
+import { analyzeDocument, removeLinks, removeReferences } from "../taskpane";
 
 const useStyles = makeStyles({
   root: {
@@ -99,7 +93,6 @@ const App: React.FC = () => {
   const styles = useStyles();
   const [status, setStatus] = React.useState<Status>("idle");
   const [isValidHost, setIsValidHost] = React.useState(false);
-  const [isHumanizing, setIsHumanizing] = React.useState(false);
   const [insertEveryOther, setInsertEveryOther] = React.useState(false);
 
   React.useEffect(() => {
@@ -129,36 +122,14 @@ const App: React.FC = () => {
     }
   };
 
-  const handleHumanizeDocument = async () => {
+  const handleRemoveLinks = async () => {
     setStatus("loading");
-    setIsHumanizing(true);
     try {
-      await humanizeDocument();
+      await removeLinks();
       setStatus("success");
     } catch (error) {
       setStatus("error");
-    } finally {
-      setIsHumanizing(false);
     }
-  };
-
-  const handleHumanizeSelectedText = async () => {
-    setStatus("loading");
-    setIsHumanizing(true);
-    try {
-      await humanizeSelectedText();
-      setStatus("success");
-    } catch (error) {
-      setStatus("error");
-    } finally {
-      setIsHumanizing(false);
-    }
-  };
-
-  const handleStopHumanize = () => {
-    stopHumanizeProcess();
-    setIsHumanizing(false);
-    setStatus("idle");
   };
 
   const getStatusDisplay = () => {
@@ -205,6 +176,14 @@ const App: React.FC = () => {
             >
               Remove References
             </Button>
+            <Button
+              appearance="secondary"
+              onClick={handleRemoveLinks}
+              disabled={status === "loading"}
+              className={styles.button}
+            >
+              Remove Links
+            </Button>
             <div
               style={{ display: "flex", alignItems: "center", marginBottom: "10px", width: "100%", maxWidth: "300px" }}
             >
@@ -230,14 +209,7 @@ const App: React.FC = () => {
             >
               Humanize All Text
             </Button> */}
-            <Button
-              appearance="primary"
-              onClick={handleHumanizeSelectedText}
-              disabled={status === "loading"}
-              className={`${styles.button} ${styles.buttonBlue}`}
-            >
-              Humanize Selected Text
-            </Button>
+
             {/* <Button
               appearance="primary"
               onClick={handleStopHumanize}

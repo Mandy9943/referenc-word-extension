@@ -13,6 +13,7 @@ import {
   humanizeDocument as humanizeDocumentInWord,
   humanizeSelectedTextInWord,
   insertText as insertTextInWord,
+  removeLinks as removeLinksInWord,
   removeReferences as removeReferencesInWord,
   requestCancelHumanize,
 } from "./word";
@@ -68,6 +69,17 @@ export async function removeReferences() {
       return await removeReferencesInPowerPoint();
     default:
       throw new Error("This function is only available in Word and PowerPoint");
+  }
+}
+
+export async function removeLinks() {
+  await Office.onReady();
+  switch (Office.context.host) {
+    case Office.HostType.Word:
+      return await removeLinksInWord();
+    case Office.HostType.PowerPoint:
+    default:
+      throw new Error("This function is only available in Word");
   }
 }
 
