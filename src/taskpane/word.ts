@@ -281,34 +281,28 @@ export async function removeLinks(): Promise<string> {
 
       console.log(`Reference section starts at paragraph index: ${lastReferenceListIndex}`);
 
-      let linksRemovedCount = 0;
-
       const paragraphsToProcess =
         lastReferenceListIndex === -1 ? paragraphs.items : paragraphs.items.slice(0, lastReferenceListIndex);
 
+      // Regex to find URL-like text, using word boundaries to correctly handle trailing punctuation.
+      const urlRegex = /\b((https?:\/\/)?[\w.-]+(?:\.[\w.-]+)+)\b/g;
+      let linksRemovedCount = 0;
+
       for (const paragraph of paragraphsToProcess) {
-        // Get ranges of all hyperlinks in the paragraph
-        const hyperlinkRanges = paragraph.getRange().getHyperlinkRanges();
-        hyperlinkRanges.load("items");
-        await context.sync();
+        const originalText = paragraph.text;
+        const matches = originalText.match(urlRegex);
 
-        if (hyperlinkRanges.items.length > 0) {
-          // Create a static copy for iteration, as the live collection will be modified.
-          const staticHyperlinkRanges = [...hyperlinkRanges.items];
-
-          // Iterate backwards to avoid invalidating ranges by modifying the document.
-          for (let i = staticHyperlinkRanges.length - 1; i >= 0; i--) {
-            const linkRange = staticHyperlinkRanges[i];
-            // Replace the hyperlink's text with an empty string to remove it.
-            linkRange.insertText("", Word.InsertLocation.replace);
-            linksRemovedCount++;
-          }
+        if (matches) {
+          linksRemovedCount += matches.length;
+          // Replace URL-like text and clean up spaces before punctuation.
+          const newText = originalText.replace(urlRegex, "").replace(/\s+([.,;])/g, "$1");
+          paragraph.insertText(newText, Word.InsertLocation.replace);
         }
       }
 
       await context.sync();
 
-      const successMessage = `Removed ${linksRemovedCount} hyperlinks from the document.`;
+      const successMessage = `Removed ${linksRemovedCount} URL-like text snippets.`;
       console.log(successMessage);
       return successMessage;
     });
