@@ -1,6 +1,7 @@
+/* global Office */
 import { Button, Checkbox, makeStyles, Text, tokens } from "@fluentui/react-components";
 import * as React from "react";
-import { analyzeDocument, removeLinks, removeReferences } from "../taskpane";
+import { analyzeDocument, removeLinks, removeReferences, removeWeirdNumbers } from "../taskpane";
 
 const useStyles = makeStyles({
   root: {
@@ -132,6 +133,16 @@ const App: React.FC = () => {
     }
   };
 
+  const handleRemoveWeirdNumbers = async () => {
+    setStatus("loading");
+    try {
+      await removeWeirdNumbers();
+      setStatus("success");
+    } catch (error) {
+      setStatus("error");
+    }
+  };
+
   const getStatusDisplay = () => {
     const baseClassName = `${styles.status} `;
     switch (status) {
@@ -183,6 +194,14 @@ const App: React.FC = () => {
               className={styles.button}
             >
               Remove Links
+            </Button>
+            <Button
+              appearance="secondary"
+              onClick={handleRemoveWeirdNumbers}
+              disabled={status === "loading"}
+              className={styles.button}
+            >
+              Delete weird numbers
             </Button>
             <div
               style={{ display: "flex", alignItems: "center", marginBottom: "10px", width: "100%", maxWidth: "300px" }}

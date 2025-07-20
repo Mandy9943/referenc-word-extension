@@ -1,4 +1,4 @@
-/* global Word console */
+/* global Word console, process, setTimeout */
 import { Anthropic } from "@anthropic-ai/sdk";
 import { getFormattedReferences } from "./gemini";
 
@@ -309,6 +309,51 @@ export async function removeLinks(): Promise<string> {
   } catch (error) {
     console.error("Error in removeLinks:", error);
     throw new Error(`Error removing links: ${error.message}`);
+  }
+}
+
+/**
+ * Removes weird number patterns from the document.
+ * Handles patterns like:
+ * - 【400489077423502†L40-L67】
+ * - [288914753644591†L299-L356]
+ *
+ * @returns {Promise<string>} A message indicating the number of instances removed.
+ */
+export async function removeWeirdNumbers(): Promise<string> {
+  try {
+    return await Word.run(async (context) => {
+      console.log("Starting weird number removal process...");
+
+      const paragraphs = context.document.body.paragraphs;
+      paragraphs.load("text");
+      await context.sync();
+
+      // Regex to find patterns like 【...】 or [...] with the specified format
+      const weirdNumberPattern = /[【[]\d+.*?[†+t].*?[】\]]\S*/g;
+      let totalRemoved = 0;
+
+      for (const paragraph of paragraphs.items) {
+        const originalText = paragraph.text;
+        const matches = originalText.match(weirdNumberPattern);
+
+        if (matches && matches.length > 0) {
+          totalRemoved += matches.length;
+          // Replace the weird numbers and clean up potential double spaces.
+          const newText = originalText.replace(weirdNumberPattern, "").replace(/\s{2,}/g, " ");
+          paragraph.insertText(newText, Word.InsertLocation.replace);
+        }
+      }
+
+      await context.sync();
+
+      const successMessage = `Removed ${totalRemoved} weird number instances.`;
+      console.log(successMessage);
+      return successMessage;
+    });
+  } catch (error) {
+    console.error("Error in removeWeirdNumbers:", error);
+    throw new Error(`Error removing weird numbers: ${error.message}`);
   }
 }
 

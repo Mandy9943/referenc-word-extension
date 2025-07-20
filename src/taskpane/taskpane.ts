@@ -15,6 +15,7 @@ import {
   insertText as insertTextInWord,
   removeLinks as removeLinksInWord,
   removeReferences as removeReferencesInWord,
+  removeWeirdNumbers as removeWeirdNumbersInWord,
   requestCancelHumanize,
 } from "./word";
 
@@ -78,6 +79,16 @@ export async function removeLinks() {
     case Office.HostType.Word:
       return await removeLinksInWord();
     case Office.HostType.PowerPoint:
+    default:
+      throw new Error("This function is only available in Word");
+  }
+}
+
+export async function removeWeirdNumbers() {
+  await Office.onReady();
+  switch (Office.context.host) {
+    case Office.HostType.Word:
+      return await removeWeirdNumbersInWord();
     default:
       throw new Error("This function is only available in Word");
   }
