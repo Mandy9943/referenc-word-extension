@@ -252,7 +252,7 @@ export async function removeReferences(): Promise<string> {
  * Removes hyperlinks from the document, skipping the "References" section.
  * @returns {Promise<string>} A message indicating the number of hyperlinks removed.
  */
-export async function removeLinks(): Promise<string> {
+export async function removeLinks(deleteAll: boolean = false): Promise<string> {
   try {
     return await Word.run(async (context) => {
       console.log("Starting link removal process...");
@@ -261,28 +261,33 @@ export async function removeLinks(): Promise<string> {
       paragraphs.load("text");
       await context.sync();
 
-      const paragraphTexts = paragraphs.items.map((p) => p.text);
+      let paragraphsToProcess = paragraphs.items;
 
-      const referenceHeaders = [
-        "Reference List",
-        "References List",
-        "References",
-        "REFERENCES LIST",
-        "REFERENCE LIST",
-        "REFERENCES",
-        "Bibliography",
-        "BIBLIOGRAPHY",
-      ];
+      if (!deleteAll) {
+        const paragraphTexts = paragraphs.items.map((p) => p.text);
 
-      // @ts-ignore
-      const lastReferenceListIndex = paragraphTexts.findLastIndex((p) =>
-        referenceHeaders.some((header) => p.includes(header))
-      );
+        const referenceHeaders = [
+          "Reference List",
+          "References List",
+          "References",
+          "REFERENCES LIST",
+          "REFERENCE LIST",
+          "REFERENCES",
+          "Bibliography",
+          "BIBLIOGRAPHY",
+        ];
 
-      console.log(`Reference section starts at paragraph index: ${lastReferenceListIndex}`);
+        // @ts-ignore
+        const lastReferenceListIndex = paragraphTexts.findLastIndex((p) =>
+          referenceHeaders.some((header) => p.includes(header))
+        );
 
-      const paragraphsToProcess =
-        lastReferenceListIndex === -1 ? paragraphs.items : paragraphs.items.slice(0, lastReferenceListIndex);
+        console.log(`Reference section starts at paragraph index: ${lastReferenceListIndex}`);
+
+        if (lastReferenceListIndex !== -1) {
+          paragraphsToProcess = paragraphs.items.slice(0, lastReferenceListIndex);
+        }
+      }
 
       // Regex to find URL-like text, using word boundaries to correctly handle trailing punctuation.
       const urlRegex = /\b((https?:\/\/)?[\w.-]+(?:\.[\w.-]+)+)\b/g;

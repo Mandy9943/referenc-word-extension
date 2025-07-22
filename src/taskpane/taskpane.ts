@@ -73,11 +73,11 @@ export async function removeReferences() {
   }
 }
 
-export async function removeLinks() {
+export async function removeLinks(deleteAll: boolean = false) {
   await Office.onReady();
   switch (Office.context.host) {
     case Office.HostType.Word:
-      return await removeLinksInWord();
+      return await removeLinksInWord(deleteAll);
     case Office.HostType.PowerPoint:
     default:
       throw new Error("This function is only available in Word");

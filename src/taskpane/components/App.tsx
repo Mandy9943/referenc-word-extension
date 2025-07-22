@@ -95,6 +95,7 @@ const App: React.FC = () => {
   const [status, setStatus] = React.useState<Status>("idle");
   const [isValidHost, setIsValidHost] = React.useState(false);
   const [insertEveryOther, setInsertEveryOther] = React.useState(false);
+  const [deleteAllLinks, setDeleteAllLinks] = React.useState(false);
 
   React.useEffect(() => {
     Office.onReady((info) => {
@@ -126,7 +127,7 @@ const App: React.FC = () => {
   const handleRemoveLinks = async () => {
     setStatus("loading");
     try {
-      await removeLinks();
+      await removeLinks(deleteAllLinks);
       setStatus("success");
     } catch (error) {
       setStatus("error");
@@ -187,6 +188,15 @@ const App: React.FC = () => {
             >
               Remove References
             </Button>
+            <div
+              style={{ display: "flex", alignItems: "center", marginBottom: "10px", width: "100%", maxWidth: "300px" }}
+            >
+              <Checkbox
+                checked={deleteAllLinks}
+                onChange={(_e, data) => setDeleteAllLinks(data.checked === true)}
+                label="Delete all links"
+              />
+            </div>
             <Button
               appearance="secondary"
               onClick={handleRemoveLinks}
