@@ -558,3 +558,53 @@ export async function humanizeSelectedTextInWord(): Promise<string> {
     throw new Error(`Error humanizing selected text: ${error.message}`);
   }
 }
+
+/**
+ * Paraphrase selected text using the local API
+ */
+export async function paraphraseSelectedText(): Promise<string> {
+  try {
+    return await Word.run(async (context) => {
+      // Get the selected range
+      const selection = context.document.getSelection();
+      selection.load("text");
+      await context.sync();
+
+      // Get the selected text content
+      const selectedText = selection.text.trim();
+
+      if (!selectedText) {
+        throw new Error("No text selected");
+      }
+
+      // Call the paraphrase API
+      const response = await fetch("https://analizeai.com/paraphrase", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ text: selectedText }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`API request failed with status ${response.status}`);
+      }
+
+      const data = await response.json();
+      const paraphrasedText = data.secondMode;
+
+      if (!paraphrasedText) {
+        throw new Error("Invalid response from paraphrase API");
+      }
+
+      // Replace the selected text with the paraphrased text
+      selection.insertText(paraphrasedText, Word.InsertLocation.replace);
+      await context.sync();
+
+      return "Text paraphrased successfully";
+    });
+  } catch (error) {
+    console.error("Error in paraphraseSelectedText:", error);
+    throw new Error(`Error paraphrasing text: ${error.message}`);
+  }
+}

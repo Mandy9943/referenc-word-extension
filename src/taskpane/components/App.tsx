@@ -1,7 +1,13 @@
 /* global Office */
 import { Button, Checkbox, makeStyles, Text, tokens } from "@fluentui/react-components";
 import * as React from "react";
-import { analyzeDocument, removeLinks, removeReferences, removeWeirdNumbers } from "../taskpane";
+import {
+  analyzeDocument,
+  paraphraseSelectedText,
+  removeLinks,
+  removeReferences,
+  removeWeirdNumbers,
+} from "../taskpane";
 
 const useStyles = makeStyles({
   root: {
@@ -144,6 +150,16 @@ const App: React.FC = () => {
     }
   };
 
+  const handleParaphraseText = async () => {
+    setStatus("loading");
+    try {
+      await paraphraseSelectedText();
+      setStatus("success");
+    } catch (error) {
+      setStatus("error");
+    }
+  };
+
   const getStatusDisplay = () => {
     const baseClassName = `${styles.status} `;
     switch (status) {
@@ -213,6 +229,14 @@ const App: React.FC = () => {
             >
               Delete weird numbers
             </Button>
+            <Button
+              appearance="secondary"
+              onClick={handleParaphraseText}
+              disabled={status === "loading"}
+              className={styles.button}
+            >
+              Paraphrase
+            </Button>
             <div
               style={{ display: "flex", alignItems: "center", marginBottom: "10px", width: "100%", maxWidth: "300px" }}
             >
@@ -238,7 +262,6 @@ const App: React.FC = () => {
             >
               Humanize All Text
             </Button> */}
-
             {/* <Button
               appearance="primary"
               onClick={handleStopHumanize}
@@ -254,7 +277,7 @@ const App: React.FC = () => {
             This add-in is optimized for Word and PowerPoint. Some features may not be available in other applications.
           </Text>
         )}
-        v1.9
+        v2.0
         {getStatusDisplay()}
       </div>
     </div>

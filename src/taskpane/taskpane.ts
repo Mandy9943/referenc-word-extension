@@ -13,6 +13,7 @@ import {
   humanizeDocument as humanizeDocumentInWord,
   humanizeSelectedTextInWord,
   insertText as insertTextInWord,
+  paraphraseSelectedText as paraphraseSelectedTextInWord,
   removeLinks as removeLinksInWord,
   removeReferences as removeReferencesInWord,
   removeWeirdNumbers as removeWeirdNumbersInWord,
@@ -111,6 +112,16 @@ export async function humanizeSelectedText() {
   switch (Office.context.host) {
     case Office.HostType.Word:
       return await humanizeSelectedTextInWord();
+    default:
+      throw new Error("This function is only available in Word");
+  }
+}
+
+export async function paraphraseSelectedText() {
+  await Office.onReady();
+  switch (Office.context.host) {
+    case Office.HostType.Word:
+      return await paraphraseSelectedTextInWord();
     default:
       throw new Error("This function is only available in Word");
   }
