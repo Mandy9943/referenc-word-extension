@@ -578,7 +578,7 @@ export async function paraphraseSelectedText(): Promise<string> {
       }
 
       // Call the paraphrase API
-      const response = await fetch("https://tunnel3090.mandy9943.dev/paraphrase", {
+      const response = await fetch("https://analizeai.com/paraphrase", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

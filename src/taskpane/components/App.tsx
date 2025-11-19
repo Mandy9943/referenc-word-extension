@@ -277,7 +277,7 @@ const App: React.FC = () => {
             This add-in is optimized for Word and PowerPoint. Some features may not be available in other applications.
           </Text>
         )}
-        v2.3
+        v2.4
         {getStatusDisplay()}
       </div>
     </div>
