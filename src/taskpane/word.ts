@@ -136,6 +136,79 @@ function findConclusionRange(
   return { conclusionHeadingIndex, conclusionEndIndex };
 }
 
+interface SentenceSlot {
+  paragraphIndex: number;
+  sentenceIndex: number;
+}
+
+function shuffleInPlace<T>(array: T[]): T[] {
+  for (let i = array.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [array[i], array[j]] = [array[j], array[i]];
+  }
+  return array;
+}
+
+function getSentenceSlotsForParagraph(paragraphIndex: number, sentenceRanges: Word.RangeCollection): SentenceSlot[] {
+  const slots: SentenceSlot[] = [];
+  const items = sentenceRanges.items;
+
+  // Don’t touch single-sentence paragraphs; they already get end-of-paragraph citations.
+  if (items.length <= 1) return slots;
+
+  for (let i = 0; i < items.length; i++) {
+    const raw = (items[i].text || "").trim();
+    if (!raw) continue;
+
+    // Skip first and last sentence in the paragraph
+    if (i === 0 || i === items.length - 1) continue;
+
+    const wordCount = raw.split(/\s+/).filter(Boolean).length;
+    if (wordCount < 8) continue; // sentence too short
+
+    // Skip sentences that already have a citation‑ish thing
+    if (/\(\s*[^)]*?\d{4}[a-z]?\s*\)/.test(raw)) continue;
+
+    // Optional: skip sentences starting with “In conclusion”, “Overall,” etc.
+    const lower = raw.toLowerCase();
+    if (
+      lower.startsWith("in conclusion") ||
+      lower.startsWith("to conclude") ||
+      lower.startsWith("overall,") ||
+      lower.startsWith("to sum up")
+    ) {
+      continue;
+    }
+
+    slots.push({ paragraphIndex, sentenceIndex: i });
+  }
+
+  // Limit per paragraph: 1–2 sentences max, chosen randomly
+  if (slots.length <= 1) return slots;
+
+  shuffleInPlace(slots);
+  const maxForParagraph = Math.min(2, slots.length);
+  const targetCount = 1 + Math.floor(Math.random() * maxForParagraph);
+  return slots.slice(0, targetCount);
+}
+
+function appendCitationAtSentenceEnd(sentence: string, citation: string): string {
+  const trimmed = sentence.trimEnd();
+
+  const match = trimmed.match(/([.?!]["')\]]*)$/);
+  if (!match) {
+    // No obvious sentence‑ending punctuation; just append.
+    const sep = /\s$/.test(trimmed) ? "" : " ";
+    return trimmed + sep + citation;
+  }
+
+  const punctuation = match[1];
+  const core = trimmed.slice(0, trimmed.length - punctuation.length);
+  const sep = /\s$/.test(core) ? "" : " ";
+
+  return `${core}${sep}${citation}${punctuation}`;
+}
+
 /**
  * Insert a simple text
  */
@@ -267,17 +340,37 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
         console.log("analyzeDocument => insertEveryOther applied", targetIndexes.length);
       }
 
-      // Shuffle available indexes
-      const randomIndex = [...targetIndexes].sort(() => Math.random() - 0.5);
-      console.log("analyzeDocument => random order", randomIndex);
+      // NEW: Sentence-level injection
+      const allSentenceSlots: SentenceSlot[] = [];
+      const sentenceRangeByParagraph: { [index: number]: Word.RangeCollection } = {};
 
-      // Insert references
+      for (const pIndex of targetIndexes) {
+        const paragraph = paragraphs.items[pIndex];
+        const ranges = paragraph.getTextRanges([".", "?", "!"], true);
+        ranges.load("text");
+        sentenceRangeByParagraph[pIndex] = ranges;
+      }
+
+      await context.sync();
+
+      for (const pIndex of targetIndexes) {
+        const ranges = sentenceRangeByParagraph[pIndex];
+        if (!ranges) continue;
+
+        const paragraphSlots = getSentenceSlotsForParagraph(pIndex, ranges);
+        allSentenceSlots.push(...paragraphSlots);
+      }
+
+      shuffleInPlace(allSentenceSlots);
+      console.log("analyzeDocument => sentence slots count", allSentenceSlots.length);
+
       const usedReferences = new Set<number>();
 
-      // Modify paragraphs with references
-      for (const index of randomIndex) {
-        let referenceIndex: number;
+      for (const slot of allSentenceSlots) {
+        const ranges = sentenceRangeByParagraph[slot.paragraphIndex];
+        const sentenceRange = ranges.items[slot.sentenceIndex];
 
+        let referenceIndex: number;
         if (usedReferences.size < references.length) {
           const unusedReferences = Array.from(Array(references.length).keys()).filter((i) => !usedReferences.has(i));
           referenceIndex = unusedReferences[Math.floor(Math.random() * unusedReferences.length)];
@@ -286,15 +379,17 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
           referenceIndex = Math.floor(Math.random() * references.length);
         }
 
-        const paragraph = paragraphs.items[index];
-        const text = paragraph.text.trim();
-        console.log("analyzeDocument => inserting reference", { paragraphIndex: index, referenceIndex });
+        const currentText = sentenceRange.text || "";
+        const citation = references[referenceIndex];
+        const newText = appendCitationAtSentenceEnd(currentText, citation);
 
-        if (text.endsWith(".")) {
-          paragraph.insertText(text.slice(0, -1) + ` ${references[referenceIndex]}.`, Word.InsertLocation.replace);
-        } else {
-          paragraph.insertText(` ${references[referenceIndex]}.`, Word.InsertLocation.end);
-        }
+        console.log("analyzeDocument => inserting reference", {
+          paragraphIndex: slot.paragraphIndex,
+          sentenceIndex: slot.sentenceIndex,
+          referenceIndex,
+        });
+
+        sentenceRange.insertText(newText, Word.InsertLocation.replace);
       }
 
       await context.sync();
