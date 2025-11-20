@@ -117,23 +117,69 @@ function findConclusionRange(
   }
 
   let conclusionEndIndex = -1;
+  let reason = "End of document (no next section found)";
 
   if (conclusionHeadingIndex !== -1) {
     for (let i = conclusionHeadingIndex + 1; i < metas.length; i++) {
       if (REFERENCE_HEADERS.some((regex) => regex.test(metas[i].text))) {
         conclusionEndIndex = i;
+        reason = `Found Reference Header at index ${i}: "${metas[i].text}"`;
         break;
       }
 
       if (isHeadingOrTitle(metas[i]) && !CONCLUSION_HEADERS.some((regex) => regex.test(metas[i].text))) {
         conclusionEndIndex = i;
+        reason = `Found next Heading at index ${i}: "${metas[i].text}"`;
+
+        // Log details about why it was detected as a heading
+        const meta = metas[i];
+        const s = meta.style;
+        const sb = meta.styleBuiltIn;
+        const isStyleMatch =
+          s.includes("heading") ||
+          s.includes("title") ||
+          s.includes("subtitle") ||
+          sb.includes("heading") ||
+          sb.includes("title") ||
+          sb.includes("subtitle");
+
+        const text = meta.text;
+        const hasTerminalPunctuation = /[.!?]$/.test(text);
+        const isShortish = meta.wordCount > 0 && meta.wordCount <= 15;
+        const isCentered = meta.alignment === "centered";
+        const words = text.split(/\s+/).filter(Boolean);
+        const capitalised = words.filter((w) => /^[A-Z]/.test(w)).length;
+        const isTitleCase = words.length > 1 && capitalised / words.length > 0.6;
+
+        console.log(`Heading Detection Details for index ${i}:`, {
+          text: meta.text,
+          style: meta.style,
+          styleBuiltIn: meta.styleBuiltIn,
+          alignment: meta.alignment,
+          wordCount: meta.wordCount,
+          heuristics: {
+            isStyleMatch,
+            hasTerminalPunctuation,
+            isShortish,
+            isCentered,
+            isTitleCase,
+            capitalisedRatio: words.length > 0 ? capitalised / words.length : 0,
+          },
+        });
         break;
       }
     }
 
     if (conclusionEndIndex === -1 && referenceStartIndex !== -1) {
       conclusionEndIndex = referenceStartIndex;
+      reason = `Reached Reference Start Index at ${referenceStartIndex}`;
     }
+  }
+
+  console.log(`Conclusion Detection: Start Index: ${conclusionHeadingIndex}`);
+  if (conclusionHeadingIndex !== -1) {
+    console.log(`Conclusion Detection: End Index: ${conclusionEndIndex}`);
+    console.log(`Conclusion Detection: End Reason: ${reason}`);
   }
 
   return { conclusionHeadingIndex, conclusionEndIndex };
@@ -280,7 +326,6 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
       const eligibleIndexes = metas
         .filter((meta) => {
           if (referenceStartIndex !== -1 && meta.index >= referenceStartIndex) {
-            console.log("eligible => skip reference section", meta.index);
             return false;
           }
 
@@ -290,12 +335,10 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
             meta.index > conclusionHeadingIndex &&
             meta.index < conclusionEndIndex
           ) {
-            console.log("eligible => skip conclusion", meta.index);
             return false;
           }
 
           if (isHeadingOrTitle(meta)) {
-            console.log("eligible => skip heading", meta.index, meta.text);
             return false;
           }
 
@@ -320,7 +363,6 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
       if (firstNonEmpty) {
         const idx = eligibleIndexes.indexOf(firstNonEmpty.index);
         if (idx !== -1) {
-          console.log("eligible => removing first paragraph", firstNonEmpty.index);
           eligibleIndexes.splice(idx, 1);
         }
       }
