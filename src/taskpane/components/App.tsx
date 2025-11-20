@@ -1,5 +1,6 @@
 /* global Office */
 import { Button, Checkbox, makeStyles, Text, tokens } from "@fluentui/react-components";
+import { Timer24Regular } from "@fluentui/react-icons";
 import * as React from "react";
 import {
   analyzeDocument,
@@ -102,6 +103,8 @@ const App: React.FC = () => {
   const [isValidHost, setIsValidHost] = React.useState(false);
   const [insertEveryOther, setInsertEveryOther] = React.useState(false);
   const [deleteAllLinks, setDeleteAllLinks] = React.useState(false);
+  const [paraphraseTime, setParaphraseTime] = React.useState<number | null>(null);
+  const timerRef = React.useRef<any>(null);
 
   React.useEffect(() => {
     Office.onReady((info) => {
@@ -152,11 +155,25 @@ const App: React.FC = () => {
 
   const handleParaphraseText = async () => {
     setStatus("loading");
+    setParaphraseTime(0);
+    const startTime = Date.now();
+
+    if (timerRef.current) clearInterval(timerRef.current);
+
+    timerRef.current = setInterval(() => {
+      setParaphraseTime((Date.now() - startTime) / 1000);
+    }, 100);
+
     try {
       await paraphraseSelectedText();
       setStatus("success");
     } catch (error) {
       setStatus("error");
+    } finally {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
     }
   };
 
@@ -237,6 +254,7 @@ const App: React.FC = () => {
             >
               Paraphrase
             </Button>
+
             <div
               style={{ display: "flex", alignItems: "center", marginBottom: "10px", width: "100%", maxWidth: "300px" }}
             >
@@ -277,8 +295,22 @@ const App: React.FC = () => {
             This add-in is optimized for Word and PowerPoint. Some features may not be available in other applications.
           </Text>
         )}
-        v2.4
+        v2.5
         {getStatusDisplay()}
+        {paraphraseTime !== null && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "8px",
+              marginBottom: "10px",
+            }}
+          >
+            <Timer24Regular />
+            <Text>{paraphraseTime.toFixed(1)}s</Text>
+          </div>
+        )}
       </div>
     </div>
   );
