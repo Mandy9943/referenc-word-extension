@@ -2,22 +2,24 @@
 import { getFormattedReferences } from "./gemini";
 
 const TRAILING_PUNCTUATION = "[-:;,.!?–—]*";
+// Allow for "1.", "1.1", "IV.", "2 " prefixes. Changed \s+ to \s* to allow "1.Conclusion"
+const NUMBERING_PREFIX = "(?:(?:\\d+(?:\\.\\d+)*|[IVX]+)\\.?\\s*)?";
 
 const REFERENCE_HEADERS = [
-  new RegExp(`^\\s*references?(?:\\s+list)?(?:\\s+section)?\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
-  new RegExp(`^\\s*reference\\s+list\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
-  new RegExp(`^\\s*references\\s+list\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
-  new RegExp(`^\\s*bibliograph(?:y|ies)\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
-  new RegExp(`^\\s*list\\s+of\\s+references\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*${NUMBERING_PREFIX}references?(?:\\s+list)?(?:\\s+section)?\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*${NUMBERING_PREFIX}reference\\s+list\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*${NUMBERING_PREFIX}references\\s+list\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*${NUMBERING_PREFIX}bibliograph(?:y|ies)\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*${NUMBERING_PREFIX}list\\s+of\\s+references\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
 ];
 
 const CONCLUSION_HEADERS = [
-  new RegExp(`^\\s*conclusions?(?:\\s+section)?\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
-  new RegExp(`^\\s*concluding\\s+remarks\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
-  new RegExp(`^\\s*final\\s+thoughts\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
-  new RegExp(`^\\s*summary(?:\\s+and\\s+future\\s+work)?\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
-  new RegExp(`^\\s*closing\\s+remarks\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
-  new RegExp(`^\\s*conclusion\\s+and\\s+recommendations\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*${NUMBERING_PREFIX}conclusions?(?:\\s+section)?\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*${NUMBERING_PREFIX}concluding\\s+remarks\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*${NUMBERING_PREFIX}final\\s+thoughts\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*${NUMBERING_PREFIX}summary(?:\\s+and\\s+future\\s+work)?\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*${NUMBERING_PREFIX}closing\\s+remarks\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*${NUMBERING_PREFIX}conclusions?\\s+and\\s+recommendations\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
 ];
 
 type ParagraphMeta = {
@@ -32,7 +34,8 @@ type ParagraphMeta = {
 function buildParagraphMeta(paragraphs: Word.ParagraphCollection): ParagraphMeta[] {
   return paragraphs.items.map((p, index) => {
     const rawText = p.text || "";
-    const text = rawText.trim();
+    // Remove zero-width spaces (\u200B), zero-width non-joiner (\u200C), zero-width joiner (\u200D), and BOM (\uFEFF)
+    const text = rawText.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
     const words = text.split(/\s+/).filter(Boolean);
     const style = (p.style || "").toString().toLowerCase();
     const styleBuiltIn = (p.styleBuiltIn || "").toString().toLowerCase();
@@ -153,15 +156,13 @@ function getSentenceSlotsForParagraph(paragraphIndex: number, sentenceRanges: Wo
   const slots: SentenceSlot[] = [];
   const items = sentenceRanges.items;
 
-  // Don’t touch single-sentence paragraphs; they already get end-of-paragraph citations.
-  if (items.length <= 1) return slots;
-
   for (let i = 0; i < items.length; i++) {
     const raw = (items[i].text || "").trim();
     if (!raw) continue;
 
-    // Skip first and last sentence in the paragraph
-    if (i === 0 || i === items.length - 1) continue;
+    // Skip first sentence in multi-sentence paragraphs.
+    // Allow the last sentence to be a candidate (end of paragraph).
+    if (i === 0 && items.length > 1) continue;
 
     const wordCount = raw.split(/\s+/).filter(Boolean).length;
     if (wordCount < 8) continue; // sentence too short
@@ -183,11 +184,11 @@ function getSentenceSlotsForParagraph(paragraphIndex: number, sentenceRanges: Wo
     slots.push({ paragraphIndex, sentenceIndex: i });
   }
 
-  // Limit per paragraph: 1–2 sentences max, chosen randomly
+  // Limit per paragraph: 1–3 sentences max, chosen randomly
   if (slots.length <= 1) return slots;
 
   shuffleInPlace(slots);
-  const maxForParagraph = Math.min(2, slots.length);
+  const maxForParagraph = Math.min(3, slots.length);
   const targetCount = 1 + Math.floor(Math.random() * maxForParagraph);
   return slots.slice(0, targetCount);
 }
@@ -465,6 +466,7 @@ export async function removeReferences(): Promise<string> {
         if (hadMatch) {
           // Replace the paragraph's content
           paragraph.getRange().insertText(text, Word.InsertLocation.replace);
+          paragraph.font.bold = false;
           console.log("Original:", originalText);
           console.log("Updated:", text);
         }
@@ -537,6 +539,7 @@ export async function removeLinks(deleteAll: boolean = false): Promise<string> {
           // Replace URL-like text and clean up spaces before punctuation.
           const newText = originalText.replace(urlRegex, "").replace(/\s+([.,;])/g, "$1");
           paragraph.insertText(newText, Word.InsertLocation.replace);
+          paragraph.font.bold = false;
         }
       }
 
@@ -582,6 +585,7 @@ export async function removeWeirdNumbers(): Promise<string> {
           // Replace the weird numbers and clean up potential double spaces.
           const newText = originalText.replace(weirdNumberPattern, "").replace(/\s{2,}/g, " ");
           paragraph.insertText(newText, Word.InsertLocation.replace);
+          paragraph.font.bold = false;
         }
       }
 
