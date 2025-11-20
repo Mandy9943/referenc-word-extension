@@ -123,29 +123,11 @@ const App: React.FC = () => {
     }
   };
 
-  const handleRemoveReferences = async () => {
+  const handleClean = async () => {
     setStatus("loading");
     try {
       await removeReferences();
-      setStatus("success");
-    } catch (error) {
-      setStatus("error");
-    }
-  };
-
-  const handleRemoveLinks = async () => {
-    setStatus("loading");
-    try {
       await removeLinks(deleteAllLinks);
-      setStatus("success");
-    } catch (error) {
-      setStatus("error");
-    }
-  };
-
-  const handleRemoveWeirdNumbers = async () => {
-    setStatus("loading");
-    try {
       await removeWeirdNumbers();
       setStatus("success");
     } catch (error) {
@@ -213,15 +195,7 @@ const App: React.FC = () => {
         <Text className={styles.title}>Essay Manager</Text>
         {isValidHost ? (
           <>
-            <Button
-              appearance="secondary"
-              onClick={handleRemoveReferences}
-              disabled={status === "loading"}
-              className={styles.button}
-            >
-              Remove References
-            </Button>
-            <div
+            {/* <div
               style={{ display: "flex", alignItems: "center", marginBottom: "10px", width: "100%", maxWidth: "300px" }}
             >
               <Checkbox
@@ -229,28 +203,22 @@ const App: React.FC = () => {
                 onChange={(_e, data) => setDeleteAllLinks(data.checked === true)}
                 label="Delete all links"
               />
-            </div>
+            </div> */}
             <Button
               appearance="secondary"
-              onClick={handleRemoveLinks}
+              onClick={handleClean}
               disabled={status === "loading"}
               className={styles.button}
+              style={{ backgroundColor: "#cf6760ff" }}
             >
-              Remove Links
-            </Button>
-            <Button
-              appearance="secondary"
-              onClick={handleRemoveWeirdNumbers}
-              disabled={status === "loading"}
-              className={styles.button}
-            >
-              Delete weird numbers
+              Clean
             </Button>
             <Button
               appearance="secondary"
               onClick={handleParaphraseText}
               disabled={status === "loading"}
               className={styles.button}
+              style={{ backgroundColor: "#7d7fd6ff" }}
             >
               Paraphrase
             </Button>
