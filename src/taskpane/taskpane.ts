@@ -3,21 +3,17 @@ import { insertText as insertTextInOneNote } from "./onenote";
 import { insertText as insertTextInOutlook } from "./outlook";
 import {
   analyzeDocument as analyzeDocumentInPowerPoint,
-  humanizeDocument as humanizeDocumentInPowerPoint,
   insertText as insertTextInPowerPoint,
   removeReferences as removeReferencesInPowerPoint,
 } from "./powerpoint";
 import { insertText as insertTextInProject } from "./project";
 import {
   analyzeDocument as analyzeDocumentInWord,
-  humanizeDocument as humanizeDocumentInWord,
-  humanizeSelectedTextInWord,
   insertText as insertTextInWord,
   paraphraseSelectedText as paraphraseSelectedTextInWord,
   removeLinks as removeLinksInWord,
   removeReferences as removeReferencesInWord,
   removeWeirdNumbers as removeWeirdNumbersInWord,
-  requestCancelHumanize,
 } from "./word";
 
 /* global Office */
@@ -95,28 +91,6 @@ export async function removeWeirdNumbers() {
   }
 }
 
-export async function humanizeDocument() {
-  await Office.onReady();
-  switch (Office.context.host) {
-    case Office.HostType.Word:
-      return await humanizeDocumentInWord();
-    case Office.HostType.PowerPoint:
-      return await humanizeDocumentInPowerPoint();
-    default:
-      throw new Error("This function is only available in Word and PowerPoint");
-  }
-}
-
-export async function humanizeSelectedText() {
-  await Office.onReady();
-  switch (Office.context.host) {
-    case Office.HostType.Word:
-      return await humanizeSelectedTextInWord();
-    default:
-      throw new Error("This function is only available in Word");
-  }
-}
-
 export async function paraphraseSelectedText() {
   await Office.onReady();
   switch (Office.context.host) {
@@ -125,12 +99,4 @@ export async function paraphraseSelectedText() {
     default:
       throw new Error("This function is only available in Word");
   }
-}
-
-/**
- * Synchronously stops the in-progress "humanize" operation in Word.
- */
-export function stopHumanizeProcess() {
-  // This will trigger the cancel logic in "word.ts"
-  requestCancelHumanize();
 }

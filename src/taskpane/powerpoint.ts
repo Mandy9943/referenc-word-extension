@@ -1,6 +1,5 @@
+/* eslint-disable office-addins/no-context-sync-in-loop */
 /* global PowerPoint console */
-
-import Anthropic from "@anthropic-ai/sdk";
 import { getFormattedReferences } from "./gemini";
 
 export async function insertText(text: string) {
@@ -271,81 +270,5 @@ export async function removeReferences(): Promise<string> {
   } catch (error) {
     console.error("Error in removeReferences:", error);
     throw new Error(`Error removing references: ${error.message}`);
-  }
-}
-
-export async function humanizeDocument(): Promise<string> {
-  const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-  const anthropic = new Anthropic({
-    apiKey: ANTHROPIC_API_KEY,
-    dangerouslyAllowBrowser: true,
-  });
-
-  try {
-    return await PowerPoint.run(async (context) => {
-      // Get all slides instead of selected slides
-      const slides = context.presentation.slides;
-      slides.load("items");
-      await context.sync();
-
-      for (let slide of slides.items) {
-        const shapes = slide.shapes;
-        shapes.load("items");
-        await context.sync();
-
-        for (let shape of shapes.items) {
-          if (shape.textFrame) {
-            try {
-              const textRange = shape.textFrame.textRange;
-              textRange.load("text");
-              await context.sync();
-
-              const text = textRange.text.trim();
-              if (text.split(" ").length <= 11) continue;
-
-              // First prompt - rewrite with grammatical variations
-              const firstResponse = await anthropic.messages.create({
-                model: "claude-3-sonnet-20240229",
-                max_tokens: 1024,
-                messages: [
-                  {
-                    role: "user",
-                    content: `You must respond with only the rewritten text, nothing else. No explanations or additional comments.\n\nRewrite this. 120 words minimum. No detectable patterns. Every sentence structure + grammar random. Include grammatical mistakes throughout, that 99% of humans wouldn't spot. 1st grade simple language. First person. Change the writing style every sentence.\n\ntext: ${text}`,
-                  },
-                ],
-              });
-
-              // Second prompt - refine and shorten while maintaining style
-              const secondResponse = await anthropic.messages.create({
-                model: "claude-3-sonnet-20240229",
-                max_tokens: 1024,
-                messages: [
-                  {
-                    role: "user",
-                    // @ts-ignore
-                    content: `You must respond with only the rewritten text, nothing else. No explanations or additional comments.\n\nI want you to rewrite this text but also shorten it while keeping the same style as the original was written. You gonna make sure each sentence feels different, and add little grammar slips that most folks won't catch. Shrink the message overall. Mix up my sentence structures randomly—one minute use short words, the next go a bit longer. keep it easy and real. Purposely sprinkle in tiny mistakes, like wrong tenses or missing commas, so no pattern shows. every sentence should change style, feel unpredictable and fresh. shorten the text but the vibe must be pure and academic. You say all this in your own way and mean it, making each line unique as you go. Write in the third person, which is characteristic of third-person narrative.\n\nText: ${firstResponse.content[0].text as string}`,
-                  },
-                ],
-              });
-
-              // Update the text with proper sync
-              await context.sync();
-              // @ts-ignore
-              textRange.text = secondResponse.content[0].text as string;
-              await context.sync();
-            } catch (error) {
-              console.warn("Error processing shape:", error);
-              continue;
-            }
-          }
-        }
-      }
-
-      await context.sync();
-      return "PowerPoint document humanized successfully";
-    });
-  } catch (error) {
-    console.error("Error in humanizeDocument:", error);
-    throw new Error(`Error humanizing document: ${error.message}`);
   }
 }

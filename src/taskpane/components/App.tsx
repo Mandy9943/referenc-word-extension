@@ -1,4 +1,4 @@
-/* global Office */
+/* global Office setInterval clearInterval */
 import { Button, Checkbox, makeStyles, Text, tokens } from "@fluentui/react-components";
 import { Timer24Regular } from "@fluentui/react-icons";
 import * as React from "react";
@@ -102,7 +102,6 @@ const App: React.FC = () => {
   const [status, setStatus] = React.useState<Status>("idle");
   const [isValidHost, setIsValidHost] = React.useState(false);
   const [insertEveryOther, setInsertEveryOther] = React.useState(false);
-  const [deleteAllLinks, setDeleteAllLinks] = React.useState(false);
   const [paraphraseTime, setParaphraseTime] = React.useState<number | null>(null);
   const timerRef = React.useRef<any>(null);
 
@@ -127,7 +126,7 @@ const App: React.FC = () => {
     setStatus("loading");
     try {
       await removeReferences();
-      await removeLinks(deleteAllLinks);
+      await removeLinks(false);
       await removeWeirdNumbers();
       setStatus("success");
     } catch (error) {
@@ -195,15 +194,6 @@ const App: React.FC = () => {
         <Text className={styles.title}>Essay Manager</Text>
         {isValidHost ? (
           <>
-            {/* <div
-              style={{ display: "flex", alignItems: "center", marginBottom: "10px", width: "100%", maxWidth: "300px" }}
-            >
-              <Checkbox
-                checked={deleteAllLinks}
-                onChange={(_e, data) => setDeleteAllLinks(data.checked === true)}
-                label="Delete all links"
-              />
-            </div> */}
             <Button
               appearance="secondary"
               onClick={handleClean}
@@ -240,23 +230,6 @@ const App: React.FC = () => {
             >
               Add References
             </Button>
-            {/* <Button
-              appearance="primary"
-              onClick={handleHumanizeDocument}
-              disabled={status === "loading"}
-              className={`${styles.button} ${styles.buttonBlue}`}
-            >
-              Humanize All Text
-            </Button> */}
-            {/* <Button
-              appearance="primary"
-              onClick={handleStopHumanize}
-              disabled={!isHumanizing}
-              className={`${styles.button}`}
-              style={{ backgroundColor: "rgb(255 10 10)", color: "#fff" }}
-            >
-              Stop Humanize Process
-            </Button> */}
           </>
         ) : (
           <Text>

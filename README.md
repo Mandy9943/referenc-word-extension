@@ -1,38 +1,141 @@
-# Office-Addin-TaskPane-React
+## Essay Manager – Reference Automation Add‑in
 
-This repository contains the source code used by the [Yo Office generator](https://github.com/OfficeDev/generator-office) when you create a new Office Add-in that appears in the task pane. You can also use this repository as a sample to base your own project from if you choose not to use the generator.
+Essay Manager is a Word and PowerPoint task pane add‑in that helps writers clean, cite, and paraphrase academic content directly inside Office. It blends a React + Fluent UI interface with host-specific Office.js scripts and a couple of curated AI services to automate inserting references, stripping unwanted citations, and paraphrasing selected passages.
 
-## TypeScript
+### Table of contents
 
-This template is written using [TypeScript](http://www.typescriptlang.org/). For the JavaScript version of this template, go to [Office-Addin-TaskPane-React-JS](https://github.com/OfficeDev/Office-Addin-TaskPane-React-JS).
+1. [Key capabilities](#key-capabilities)
+2. [How it works](#how-it-works)
+3. [Task pane buttons (what & how)](#task-pane-buttons-what--how)
+4. [External services & configuration](#external-services--configuration)
+5. [Getting started](#getting-started)
+6. [Everyday usage](#everyday-usage)
+7. [Testing & quality](#testing--quality)
+8. [Troubleshooting & tips](#troubleshooting--tips)
+9. [Contributing & license](#contributing--license)
 
-## Debugging
+## Key capabilities
 
-This template supports debugging using any of the following techniques:
+| Feature | Word | PowerPoint | Description |
+| --- | --- | --- | --- |
+| **Add References** (`analyzeDocument`) | ✅ | ✅ | Detects the “Reference List” section, reformats entries with Gemini, and weaves randomized `(Author, Year)` citations back into paragraph text or shapes while skipping headings/TOC entries. |
+| **Clean Document** (`removeReferences`, `removeLinks`, `removeWeirdNumbers`) | ✅ | ⚪️ | Sequentially removes inline citations, URL-like strings outside the references section, and clipboard artifacts such as ``. |
+| **Paraphrase Selection** (`paraphraseSelectedText`) | ✅ | ⚪️ | Sends the user’s selection to AnalizeAI, then replaces the range with the returned `secondMode` paraphrase while tracking elapsed time. |
+| **Insert Text helpers** (`insertText`) | ✅ | ✅ | Demo helpers per host used by tests and potential ribbon commands. |
 
-- [Use a browser's developer tools](https://learn.microsoft.com/office/dev/add-ins/testing/debug-add-ins-in-office-online)
-- [Attach a debugger from the task pane](https://learn.microsoft.com/office/dev/add-ins/testing/attach-debugger-from-task-pane)
-- [Use F12 developer tools on Windows 10](https://learn.microsoft.com/office/dev/add-ins/testing/debug-add-ins-using-f12-developer-tools-on-windows-10)
+> ⚪️ = feature not available on that host yet. The add-in automatically checks `Office.context.host` before executing a command to avoid unsupported scenarios.
 
-## Questions and comments
+## How it works
 
-We'd love to get your feedback about this sample. You can send your feedback to us in the *Issues* section of this repository.
+### High-level flow
 
-Questions about Office Add-ins development in general should be posted to [Microsoft Q&A](https://learn.microsoft.com/answers/questions/185087/questions-about-office-add-ins.html). If your question is about the Office JavaScript APIs, make sure it's tagged with [office-js-dev].
+1. **Task pane UI (`src/taskpane/components`)** – A React app styled with Fluent UI surfaces the visible actions (Add References, Clean, Paraphrase) plus the *Insert references every other paragraph* toggle.
+2. **Host router (`src/taskpane/taskpane.ts`)** – Each button calls into a host-aware wrapper that runs only after `Office.onReady`. It forwards the call to the Word or PowerPoint implementation and throws when the host is unsupported.
+3. **Host implementations** – Files inside `src/taskpane/<host>.ts` use Office.js APIs to read and mutate document content:
+	- `word.ts` walks `context.document.body.paragraphs`, extracts reference sections, calls Gemini formatting, removes citations/links/odd markers, and performs selection-based paraphrasing.
+	- `powerpoint.ts` iterates slides/shapes, loads each `textFrame`, and performs similar reference injection logic adapted to shapes.
+4. **AI helpers** – Utility modules encapsulate third-party services:
+	- `gemini.ts` formats reference blocks using Google Generative AI (Gemini 2.5 Flash Lite).
+	- `paraphraseSelectedText` POSTs to `https://analizeai.com/paraphrase` and uses the `secondMode` field.
+5. **Feedback loop** – The React layer shows loading / success / error banners, a stopwatch for long paraphrase calls, and automatically resets UI state once asynchronous work finishes.
 
-## Join the Microsoft 365 Developer Program
+### Notable implementation details
 
-Join the [Microsoft 365 Developer Program](https://aka.ms/m365devprogram) to get resources and information to help you build solutions for the Microsoft 365 platform, including recommendations tailored to your areas of interest.
+* **Reference detection** – Multiple header spellings (“Reference List”, “REFERENCES”, etc.) are supported. Only the last occurrence is considered so appendices remain untouched.
+* **Smart filtering** – Before injecting citations, the add-in filters out paragraphs that look like TOC entries, heading lines ending with `:`, or those shorter than 11 words.
+* **Host parity** – Word and PowerPoint share the same action names but use host-specific object models (`Word.run`, `PowerPoint.run`). Other hosts (Excel, Outlook, OneNote, Project) retain demo `insertText` shims for future growth.
 
-You might also qualify for a free developer subscription that's renewable for 90 days and comes configured with sample data; for details, see the [FAQ](https://learn.microsoft.com/office/developer-program/microsoft-365-developer-program-faq#who-qualifies-for-a-microsoft-365-e5-developer-subscription-).
+## Task pane buttons (what & how)
 
-## Additional resources
+| Button | Visible behavior | Under the hood |
+| --- | --- | --- |
+| **Clean** | Single magenta button; status pill switches from “Processing…” to green success (or red error) after the pipeline finishes. | 1) `removeReferences()` loops through every paragraph, matches APA-like inline citations with several regexes, removes them, and fixes doubled spaces/periods.<br>2) `removeLinks(false)` rebuilds the paragraph list, slices everything **before** the references section, and strips bare URLs using a boundary-aware regex so punctuation stays intact.<br>3) `removeWeirdNumbers()` looks for clipboard artifacts such as ``, deletes them, and normalizes whitespace. Each function runs inside its own `Word.run`, so text is updated immediately before the next stage begins. |
+| **Paraphrase** | Lilac button that requires highlighted text. A stopwatch under the buttons ticks every 100 ms until the request resolves; status messaging mirrors success/error. | 1) `Word.run` loads `context.document.getSelection()` and bails out if it’s empty.<br>2) Sends `fetch("https://analizeai.com/paraphrase")` with `{ text: <selected> }` JSON; no auth keys needed.<br>3) Parses the JSON payload, pulls `secondMode`, and if it exists, calls `selection.insertText(..., Word.InsertLocation.replace)` to swap the text in-place.<br>4) Timer uses `setInterval`/`clearInterval` in React state so users see exactly how long the remote call took. |
+| **Add References** | Green primary button with a helper checkbox “Insert references every other paragraph”. When done, the status pill announces success and Word/PowerPoint content now contains inline citations. | 1) `Word.run` (or `PowerPoint.run`) loads every paragraph/shape, building a plain-text copy of the whole document/presentation.<br>2) Searches from the bottom up for any header variant (“Reference List”, “REFERENCES”, etc.); if none are found the action exits early.<br>3) Slices the text from that header to the end and feeds the raw block to `getFormattedReferences()`, which calls Gemini 2.5 Flash Lite. The AI responds with blank-line-separated `(Author, Year)` entries that we split and trim.<br>4) Builds a list of eligible paragraphs by excluding anything shorter than 11 words, ending with `:`, or matching TOC patterns (dot leaders or tabbed page numbers). If the checkbox is checked, the code keeps only every other eligible index to reduce density.<br>5) Randomizes the eligible index list, then for each target paragraph inserts one of the formatted citations at the end (or before the trailing period). Used citations are tracked so Gemini outputs are reused evenly before repeating. PowerPoint follows the same steps but operates on shape text ranges instead of body paragraphs. |
 
-- [Office Add-ins documentation](https://learn.microsoft.com/office/dev/add-ins/overview/office-add-ins)
-- More Office Add-ins samples at [OfficeDev on Github](https://github.com/officedev)
+No other buttons are wired today—there is intentionally **no** humanize or DeepSeek functionality left in the codebase, which keeps configuration limited to Gemini + AnalizeAI.
 
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/). For more information, see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
+## External services & configuration
 
-## Copyright
+| Service | File(s) | Purpose | Required variables |
+| --- | --- | --- | --- |
+| Google Generative AI (Gemini 2.5 Flash Lite) | `src/taskpane/gemini.ts` | Rewrites raw reference sections into `(Author, Year)` snippets. | `GEMINI_API_KEY` |
+| AnalizeAI paraphrase API | `src/taskpane/word.ts` | Remotely paraphrases the current text selection. | _none_ (public HTTPS call) |
 
-Copyright (c) 2021 Microsoft Corporation. All rights reserved.
+Create a `.env` (or `.env.local`) in the project root before running dev builds:
+
+```bash
+GEMINI_API_KEY=AIza...
+```
+
+> The bundler injects environment variables via `dotenv-webpack`. Never expose production keys in source control—use local `.env` files or CI secrets.
+
+## Getting started
+
+1. **Prerequisites**
+	- Node.js 16.x–20.x and npm 7–10 (see `package.json` `engines`).
+	- Office desktop (Word or PowerPoint) or Office on the web with sideloading enabled.
+	- Optional: Microsoft 365 Developer Program subscription for sandbox tenants.
+
+2. **Install dependencies**
+	```bash
+	npm install
+	```
+
+3. **Run the dev server (hot reload for the React pane)**
+	```bash
+	npm run dev-server
+	```
+
+4. **Sideload into Word (desktop)**
+	```bash
+	npm run start:desktop -- --app word
+	```
+	The script uses `manifest.xml`. Additional manifests exist for Excel, PowerPoint, Outlook, OneNote, and Project in the repo root.
+
+5. **Stop debugging**
+	```bash
+	npm run stop
+	```
+
+6. **Build production assets**
+	```bash
+	npm run build
+	```
+
+## Everyday usage
+
+1. Launch Word or PowerPoint with the add-in loaded and open the **Essay Manager** task pane.
+2. Choose an action:
+	- **Add References** – Optionally enable *Insert references every other paragraph*, then press the green button. The add-in reads the document, calls Gemini to normalize references, and injects citations while logging progress to the console for troubleshooting.
+	- **Clean** – Runs `removeReferences`, `removeLinks`, and `removeWeirdNumbers` in sequence. Useful after pasting AI output or bibliographies from PDFs.
+	- **Paraphrase** – Highlight text, click **Paraphrase**, and watch the live stopwatch until the AnalizeAI response replaces the selection.
+3. Review the status indicator: grey (idle), brand blue (processing), green (success), or red (error). Errors are also printed in the Office task pane console (Edge DevTools).
+
+### Behind the scenes
+
+* All Word mutations happen within a single `Word.run` batch to keep context state consistent.
+* PowerPoint text updates re-load each `textFrame.textRange` to avoid stale object errors.
+* The `Clean` pipeline is intentionally sequential: removing citations first prevents dangling periods before URL removal and weird-number cleanup.
+
+## Testing & quality
+
+| Command | Purpose |
+| --- | --- |
+| `npm run test:unit` | Runs Mocha tests under `test/unit` that exercise host logic via the Office mock runtime. |
+| `npm run test:e2e` | Launches Mocha + Playwright-style helpers in `test/end-to-end` to verify manifest + UI wiring. |
+| `npm run lint` / `npm run lint:fix` | Applies the Office Add-in ESLint + Prettier config to TypeScript/React files. |
+
+Developers should run lint + unit tests before opening a PR; E2E coverage is slower but recommended after major host-behavior changes.
+
+## Troubleshooting & tips
+
+- **Add-in fails to sideload** – Run `npm run convert-to-single-host` to shrink the manifest to a single host, or double-check that Office “Trusted Add-in Catalog” is configured.
+- **AI calls hang** – Confirm environment variables are exposed to the bundler and that your tenant/network allows outbound HTTPS to Google AI (Gemini) and AnalizeAI.
+- **Office.js object invalid** – Ensure every `load` is followed by `await context.sync()` before accessing properties, especially when iterating PowerPoint shapes.
+
+## Contributing & license
+
+Pull requests and issues are welcome. Please review **CONTRIBUTING.md**, **SECURITY.md**, and the Microsoft Open Source Code of Conduct before submitting changes.
+
+This project remains under the MIT license (see `LICENSE`).

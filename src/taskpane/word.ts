@@ -1,16 +1,139 @@
-/* global Word console, process, setTimeout */
-import { Anthropic } from "@anthropic-ai/sdk";
+/* global Word console, fetch */
 import { getFormattedReferences } from "./gemini";
 
-// Add a cancellation flag and helper methods
-let isHumanizeCancelled = false;
+const TRAILING_PUNCTUATION = "[-:;,.!?–—]*";
 
-export function requestCancelHumanize() {
-  isHumanizeCancelled = true;
+const REFERENCE_HEADERS = [
+  new RegExp(`^\\s*references?(?:\\s+list)?(?:\\s+section)?\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*reference\\s+list\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*references\\s+list\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*bibliograph(?:y|ies)\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*list\\s+of\\s+references\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+];
+
+const CONCLUSION_HEADERS = [
+  new RegExp(`^\\s*conclusions?(?:\\s+section)?\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*concluding\\s+remarks\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*final\\s+thoughts\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*summary(?:\\s+and\\s+future\\s+work)?\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*closing\\s+remarks\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*conclusion\\s+and\\s+recommendations\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+];
+
+type ParagraphMeta = {
+  index: number;
+  text: string;
+  wordCount: number;
+  style: string;
+  styleBuiltIn: string;
+  alignment: string;
+};
+
+function buildParagraphMeta(paragraphs: Word.ParagraphCollection): ParagraphMeta[] {
+  return paragraphs.items.map((p, index) => {
+    const rawText = p.text || "";
+    const text = rawText.trim();
+    const words = text.split(/\s+/).filter(Boolean);
+    const style = (p.style || "").toString().toLowerCase();
+    const styleBuiltIn = (p.styleBuiltIn || "").toString().toLowerCase();
+    const alignment = (typeof p.alignment === "string" ? p.alignment : String(p.alignment || "")).toLowerCase();
+
+    return {
+      index,
+      text,
+      wordCount: words.length,
+      style,
+      styleBuiltIn,
+      alignment,
+    };
+  });
 }
 
-export function resetHumanizeCancelState() {
-  isHumanizeCancelled = false;
+function isHeadingOrTitle(meta: ParagraphMeta): boolean {
+  const s = meta.style;
+  const sb = meta.styleBuiltIn;
+
+  if (
+    s.includes("heading") ||
+    s.includes("title") ||
+    s.includes("subtitle") ||
+    sb.includes("heading") ||
+    sb.includes("title") ||
+    sb.includes("subtitle")
+  ) {
+    return true;
+  }
+
+  const text = meta.text;
+  if (!text) return false;
+
+  const hasTerminalPunctuation = /[.!?]$/.test(text);
+  const isShortish = meta.wordCount > 0 && meta.wordCount <= 15;
+  const isCentered = meta.alignment === "centered";
+
+  const words = text.split(/\s+/).filter(Boolean);
+  const capitalised = words.filter((w) => /^[A-Z]/.test(w)).length;
+  const isTitleCase = words.length > 1 && capitalised / words.length > 0.6;
+
+  if (!hasTerminalPunctuation && isShortish && (isCentered || isTitleCase)) {
+    return true;
+  }
+
+  return false;
+}
+
+function looksLikeTOC(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  const dotLeaderWithPage = /\.{5,}.*\d+\s*$/.test(trimmed);
+  const hasTab = /\t/.test(trimmed);
+  return dotLeaderWithPage || hasTab;
+}
+
+function findReferenceStartIndex(metas: ParagraphMeta[]): number {
+  for (let i = metas.length - 1; i >= 0; i--) {
+    if (REFERENCE_HEADERS.some((regex) => regex.test(metas[i].text))) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function findConclusionRange(
+  metas: ParagraphMeta[],
+  referenceStartIndex: number
+): { conclusionHeadingIndex: number; conclusionEndIndex: number } {
+  let conclusionHeadingIndex = -1;
+
+  for (let i = referenceStartIndex === -1 ? metas.length - 1 : referenceStartIndex - 1; i >= 0; i--) {
+    const txt = metas[i].text;
+    if (CONCLUSION_HEADERS.some((regex) => regex.test(txt))) {
+      conclusionHeadingIndex = i;
+      break;
+    }
+  }
+
+  let conclusionEndIndex = -1;
+
+  if (conclusionHeadingIndex !== -1) {
+    for (let i = conclusionHeadingIndex + 1; i < metas.length; i++) {
+      if (REFERENCE_HEADERS.some((regex) => regex.test(metas[i].text))) {
+        conclusionEndIndex = i;
+        break;
+      }
+
+      if (isHeadingOrTitle(metas[i]) && !CONCLUSION_HEADERS.some((regex) => regex.test(metas[i].text))) {
+        conclusionEndIndex = i;
+        break;
+      }
+    }
+
+    if (conclusionEndIndex === -1 && referenceStartIndex !== -1) {
+      conclusionEndIndex = referenceStartIndex;
+    }
+  }
+
+  return { conclusionHeadingIndex, conclusionEndIndex };
 }
 
 /**
@@ -32,106 +155,121 @@ export async function insertText(text: string) {
 export async function analyzeDocument(insertEveryOther: boolean = false): Promise<string> {
   try {
     return await Word.run(async (context) => {
+      console.log("analyzeDocument => start", { insertEveryOther });
       // Get all paragraphs from the document
       const paragraphs = context.document.body.paragraphs;
-      paragraphs.load("text");
+      paragraphs.load("text,style,styleBuiltIn,alignment");
       await context.sync();
 
-      // Convert paragraphs to array of strings
-      const paragraphTexts = paragraphs.items.map((p) => p.text);
-      console.log(paragraphTexts);
-
-      // Get and format references (using existing code)
-      const bodyText = context.document.body;
-      bodyText.load("text");
-      await context.sync();
-
-      const text = bodyText.text;
-      // Define possible reference headers
-      const referenceHeaders = [
-        "Reference List",
-        "References List",
-        "References",
-        "REFERENCES LIST",
-        "REFERENCE LIST",
-        "REFERENCES",
-      ];
-
-      // Find the first matching header and its index
-      let referenceIndex = -1;
-      for (const header of referenceHeaders) {
-        const index = text.lastIndexOf(header);
-        if (index !== -1 && (referenceIndex === -1 || index > referenceIndex)) {
-          referenceIndex = index;
-        }
+      const metas = buildParagraphMeta(paragraphs);
+      console.log("analyzeDocument => paragraph count", metas.length);
+      if (metas.length === 0) {
+        console.warn("analyzeDocument => abort: empty document");
+        return "No content found in the document";
       }
 
-      let references: string[] = [];
-      console.log({ referenceIndex });
-
-      if (referenceIndex !== -1) {
-        const referenceSection = text.substring(referenceIndex);
-        try {
-          const formattedRefs = await getFormattedReferences(referenceSection);
-          console.log({ referenceSection });
-
-          references = formattedRefs.split("\n\n");
-          references = references.map((ref) => ref.trim());
-          console.log("References:", references);
-        } catch (error) {
-          console.error("Error in getFormattedReferences:", error);
-          throw error;
-        }
-      } else {
+      const referenceStartIndex = findReferenceStartIndex(metas);
+      console.log({ referenceStartIndex });
+      if (referenceStartIndex === -1) {
+        console.warn("analyzeDocument => abort: missing reference header");
         return "No Reference List section found";
       }
 
-      // Update the findLastIndex check to include all possible headers
-      // @ts-ignore
-      const lastReferenceListIndex = paragraphTexts.findLastIndex((p) =>
-        referenceHeaders.some((header) => p.includes(header))
-      );
-      console.log({ lastReferenceListIndex });
+      const referenceSection = paragraphs.items
+        .slice(referenceStartIndex)
+        .map((p) => p.text)
+        .join("\n");
+      console.log("analyzeDocument => referenceSection length", referenceSection.length);
+
+      let references: string[] = [];
+      try {
+        const formattedRefs = await getFormattedReferences(referenceSection);
+        references = formattedRefs
+          .split(/\n\s*\n/)
+          .map((ref) => ref.trim())
+          .filter(Boolean);
+        console.log("analyzeDocument => formatted reference count", references.length);
+      } catch (error) {
+        console.error("Error in getFormattedReferences:", error);
+        throw error;
+      }
+
+      if (references.length === 0) {
+        console.warn("analyzeDocument => abort: gemini returned no references");
+        return "No valid references found in the Reference List section";
+      }
+
+      const { conclusionHeadingIndex, conclusionEndIndex } = findConclusionRange(metas, referenceStartIndex);
+      console.log("analyzeDocument => conclusion range", { conclusionHeadingIndex, conclusionEndIndex });
 
       // Filter out short paragraphs, TOC lines, and those ending with ":"
-      const isTOCLine = (text: string): boolean => {
-        const trimmed = text.trim();
-        if (!trimmed) return false;
-        // Lines with dot leaders followed by a page number, e.g. "Heading ..... 3"
-        const dotLeaderWithPage = /\.{5,}.*\d+\s*$/.test(trimmed);
-        // Lines containing tab characters (commonly used in TOC)
-        const hasTab = /\t/.test(trimmed);
-        return dotLeaderWithPage || hasTab;
-      };
+      const eligibleIndexes = metas
+        .filter((meta) => {
+          if (referenceStartIndex !== -1 && meta.index >= referenceStartIndex) {
+            console.log("eligible => skip reference section", meta.index);
+            return false;
+          }
 
-      const excludeIndexes = paragraphTexts
-        .map((para, index) =>
-          para.endsWith(": ") || para.split(/\s+/).length <= 11 || index > lastReferenceListIndex || isTOCLine(para)
-            ? index
-            : -1
-        )
-        .filter((index) => index !== -1);
+          if (
+            conclusionHeadingIndex !== -1 &&
+            conclusionEndIndex !== -1 &&
+            meta.index > conclusionHeadingIndex &&
+            meta.index < conclusionEndIndex
+          ) {
+            console.log("eligible => skip conclusion", meta.index);
+            return false;
+          }
 
-      console.log({ excludeIndexes });
+          if (isHeadingOrTitle(meta)) {
+            console.log("eligible => skip heading", meta.index, meta.text);
+            return false;
+          }
 
-      // Get available paragraph indexes
-      const availableIndexes = Array.from({ length: paragraphTexts.length }, (_, i) => i).filter(
-        (index) => !excludeIndexes.includes(index)
-      );
+          if (meta.wordCount < 11) {
+            return false;
+          }
 
-      console.log({ availableIndexes });
+          if (looksLikeTOC(meta.text)) {
+            return false;
+          }
+
+          if (meta.text.trim().endsWith(":")) {
+            return false;
+          }
+
+          return true;
+        })
+        .map((meta) => meta.index);
+
+      // Safety: remove first non-empty paragraph even if it passed filters
+      const firstNonEmpty = metas.find((meta) => meta.text.length > 0);
+      if (firstNonEmpty) {
+        const idx = eligibleIndexes.indexOf(firstNonEmpty.index);
+        if (idx !== -1) {
+          console.log("eligible => removing first paragraph", firstNonEmpty.index);
+          eligibleIndexes.splice(idx, 1);
+        }
+      }
+
+      if (eligibleIndexes.length === 0) {
+        console.warn("analyzeDocument => abort: no eligible paragraphs");
+        return "No eligible paragraphs found for inserting references";
+      }
+      console.log("analyzeDocument => eligible count", eligibleIndexes.length);
 
       // If insertEveryOther is true, only use every other paragraph
-      let targetIndexes = [...availableIndexes];
-      if (insertEveryOther && availableIndexes.length > 0) {
+      let targetIndexes = [...eligibleIndexes];
+      if (insertEveryOther && targetIndexes.length > 0) {
         // Sort available indexes to ensure we're working with ordered paragraphs
         targetIndexes.sort((a, b) => a - b);
         // Filter to only include every other paragraph
         targetIndexes = targetIndexes.filter((_, i) => i % 2 === 0);
+        console.log("analyzeDocument => insertEveryOther applied", targetIndexes.length);
       }
 
       // Shuffle available indexes
       const randomIndex = [...targetIndexes].sort(() => Math.random() - 0.5);
+      console.log("analyzeDocument => random order", randomIndex);
 
       // Insert references
       const usedReferences = new Set<number>();
@@ -150,6 +288,7 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
 
         const paragraph = paragraphs.items[index];
         const text = paragraph.text.trim();
+        console.log("analyzeDocument => inserting reference", { paragraphIndex: index, referenceIndex });
 
         if (text.endsWith(".")) {
           paragraph.insertText(text.slice(0, -1) + ` ${references[referenceIndex]}.`, Word.InsertLocation.replace);
@@ -159,6 +298,7 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
       }
 
       await context.sync();
+      console.log("analyzeDocument => completed");
       return "References added successfully";
     });
   } catch (error) {
@@ -359,203 +499,6 @@ export async function removeWeirdNumbers(): Promise<string> {
   } catch (error) {
     console.error("Error in removeWeirdNumbers:", error);
     throw new Error(`Error removing weird numbers: ${error.message}`);
-  }
-}
-
-const systemprompot = `Claude is Claude, created by Anthropic. You are an AI for rewriting texts. When you get a text, rewrite it. Each sentence should have its own structure and grammar way. Include small grammatical mistakes that are hard to notice. Use words so simple, like a first-grader uses. Keep the main ideas and topics same. Stick to the same tense, person, and voice as the original. Write each sentence in a different way, making them unique. Sprinkle in little grammar slips that folks hardly notice. Mix short and long sentences randomly. Keep it easy. Ensure sentences feel fresh and unpredictable. Blend essay style with casual talk. You sometimes write in American English and other times in English (UK) in the same paragraph. Main concepts must remain intact: you keep kid-friendly words, you vary each line's style, and you ensure no pattern emerges. Claude strives to scramble structures unpredictably—some grammar slip-ups here, some missing letter there. Go gentle, but keep that text fresh. The user specifically wants an overall simpler approach. Each sentence changes style, so it feels lively. We does it with best ability. This is the user's instructions, and Claude must abide. `;
-const prompt = (
-  text
-) => `Rewrite this using English (US). No detectable patterns. Every sentence structure + grammar random. Include grammatical mistakes throughout that 99% of humans wouldn't spot. 1st grade simple language. KEEP THE MAIN IDEAS, TOPICS AND SUBJECT OF THE ORIGINAL TEXT. KEEP THE SAME TENSE AS THE ORIGINAL TEXT. KEEP THE SAME PERSON AS THE ORIGINAL TEXT. KEEP THE SAME VOICE AS THE ORIGINAL TEXT. 
-
-Output should be slightly bigger than the original text. 
-
-Change the writing style every sentence. You say all this in your own way and mean it, making each line unique as you go. You gonna make sure each sentence feels different. Mix up sentence structures randomly—one minute use short words, the next go a bit longer. Keep it easy and real. Purposely sprinkle in tiny mistakes, like dont instead of don't / its instead if it's or missing commas, so no pattern shows. every sentence should change style, feel unpredictable and fresh. 
-
-With this in mind please output a text that blends essay writing with normal writing while respecting the same tense, person, and voice of the original text. 
-
-You sometimes write English (UK) in some paragraphs.
-
-THE OUTPUTS SHOULD BE IN THE FORMAT OF MULTIPLE PARAGRAPHS.
-
-DON'T WRITE ANY QUESTIONS LIKE "Ya know what" OR ANY OTHER KIND OF QUESTION IN THE OUTPUT.
-
-Never say something like "Here's a mixed US/UK version with intentional subtle variations" or [Note:...] in the output.
-                      \n\n${text} `;
-
-/**
- * Humanize entire document
- */
-export async function humanizeDocument(): Promise<string> {
-  const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-  const anthropic = new Anthropic({
-    apiKey: ANTHROPIC_API_KEY,
-    dangerouslyAllowBrowser: true,
-  });
-
-  try {
-    // Before starting, reset the cancel state
-    resetHumanizeCancelState();
-
-    return await Word.run(async (context) => {
-      console.log("humanizeDocument");
-      console.log("ANTHROPIC_API_KEY ", ANTHROPIC_API_KEY);
-
-      const paragraphs = context.document.body.paragraphs;
-      paragraphs.load("text");
-      await context.sync();
-
-      const paragraphTexts = paragraphs.items.map((p) => p.text);
-
-      // Filter paragraphs using the same logic as before
-      const excludeIndexes = paragraphTexts
-        .map((para, index) => (para.endsWith(": ") || para.split(" ").length <= 11 ? index : -1))
-        .filter((index) => index !== -1);
-
-      const availableIndexes = Array.from({ length: paragraphTexts.length }, (_, i) => i).filter(
-        (index) => !excludeIndexes.includes(index)
-      );
-
-      // Process paragraphs in parallel while maintaining order
-      const batchSize = 2; // Number of concurrent API calls
-      const results: { index: number; text: string }[] = [];
-
-      for (let i = 0; i < availableIndexes.length; i += batchSize) {
-        // If the user has requested cancellation, stop immediately
-        if (isHumanizeCancelled) {
-          throw new Error("Humanize process was cancelled by the user.");
-        }
-
-        const batch = availableIndexes.slice(i, i + batchSize);
-        const batchPromises = batch.map(async (index) => {
-          const text = paragraphTexts[index].trim();
-          try {
-            const msg = await anthropic.messages.create({
-              model: "claude-3-5-sonnet-20241022",
-              max_tokens: 8192,
-              temperature: 1,
-              system: systemprompot,
-              messages: [
-                {
-                  role: "user",
-                  content: [
-                    {
-                      type: "text",
-                      text: prompt(text),
-                    },
-                  ],
-                },
-              ],
-            });
-            // @ts-ignore
-            return { index, text: msg.content[0].text as string };
-          } catch (error) {
-            console.error(`Error processing paragraph ${index}:`, error);
-            return { index, text: text }; // Return original text on error
-          }
-        });
-
-        // Wait for current batch to complete
-        const batchResults = await Promise.all(batchPromises);
-        results.push(...batchResults);
-      }
-
-      // Sort results by original index and update paragraphs
-      results.sort((a, b) => a.index - b.index);
-      for (const { index, text } of results) {
-        paragraphs.items[index].insertText(text, Word.InsertLocation.replace);
-      }
-
-      await context.sync();
-      return "Document humanized successfully";
-    });
-  } catch (error) {
-    console.error("Error in humanizeDocument:", error);
-    throw new Error(`Error humanizing document: ${error.message}`);
-  }
-}
-
-/**
- * Humanize selected text
- */
-export async function humanizeSelectedTextInWord(): Promise<string> {
-  const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-  const anthropic = new Anthropic({
-    apiKey: ANTHROPIC_API_KEY,
-    dangerouslyAllowBrowser: true,
-  });
-
-  try {
-    // Before starting, reset the cancel state
-    resetHumanizeCancelState();
-
-    return await Word.run(async (context) => {
-      // Get the selected range
-      const selection = context.document.getSelection();
-      selection.load("text");
-      await context.sync();
-
-      // Get the selected text content
-      const selectedText = selection.text;
-
-      // Split the selected text into paragraphs
-      const paragraphTexts = selectedText.split("\n").filter((text) => text.trim().length > 0);
-      console.log(paragraphTexts);
-
-      // Process paragraphs in parallel while maintaining order
-      const batchSize = 2;
-      const results: { index: number; text: string }[] = [];
-
-      for (let i = 0; i < paragraphTexts.length; i += batchSize) {
-        // If the user has requested cancellation, stop immediately
-        if (isHumanizeCancelled) {
-          throw new Error("Humanize process was cancelled by the user.");
-        }
-
-        const batch = paragraphTexts.slice(i, i + batchSize);
-        const batchPromises = batch.map(async (text, batchIndex) => {
-          const index = i + batchIndex;
-          try {
-            const msg = await anthropic.messages.create({
-              model: "claude-3-5-sonnet-20241022",
-              max_tokens: 8192,
-              temperature: 1,
-              system: systemprompot,
-              messages: [
-                {
-                  role: "user",
-                  content: [{ type: "text", text: prompt(text.trim()) }],
-                },
-              ],
-            });
-            // @ts-ignore
-            return { index, text: msg.content[0].text as string };
-          } catch (error) {
-            console.error(`Error processing paragraph ${index}:`, error);
-            return { index, text: text }; // Return original text on error
-          }
-        });
-
-        const batchResults = await Promise.all(batchPromises);
-        results.push(...batchResults);
-
-        if (i + batchSize < paragraphTexts.length) {
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-        }
-      }
-
-      // Sort results and join them back together
-      results.sort((a, b) => a.index - b.index);
-      const finalText = results.map((r) => r.text).join("\n\n");
-
-      // Replace the selected text with the processed text
-      selection.insertText(finalText, Word.InsertLocation.replace);
-      await context.sync();
-
-      return `Successfully humanized ${results.length} paragraphs`;
-    });
-  } catch (error) {
-    console.error("Error in humanizeSelectedText:", error);
-    throw new Error(`Error humanizing selected text: ${error.message}`);
   }
 }
 
