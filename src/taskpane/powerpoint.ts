@@ -142,6 +142,64 @@ function shuffleInPlace<T>(array: T[]): T[] {
   return array;
 }
 
+const TEXT_CAPABLE_SHAPE_TYPES = new Set(["GeometricShape", "TextBox", "Placeholder", "SmartArt", "Group"]);
+
+type TextShapeHandle = {
+  slide: PowerPoint.Slide;
+  shape: PowerPoint.Shape;
+  slideIndex: number;
+  shapeIndex: number;
+};
+
+function describeShape(handle: TextShapeHandle): string {
+  return `slide ${handle.slideIndex} shape ${handle.shapeIndex}`;
+}
+
+async function loadTextCapableShapes(context: PowerPoint.RequestContext): Promise<TextShapeHandle[]> {
+  const slides = context.presentation.slides;
+  slides.load("items/index, items/id, items/shapes/items/id, items/shapes/items/type");
+  await context.sync();
+
+  const handles: TextShapeHandle[] = [];
+
+  for (let i = 0; i < slides.items.length; i++) {
+    const slide = slides.items[i];
+    for (let j = 0; j < slide.shapes.items.length; j++) {
+      const shape = slide.shapes.items[j];
+      if (!TEXT_CAPABLE_SHAPE_TYPES.has(shape.type)) continue;
+      handles.push({ slide, shape, slideIndex: i, shapeIndex: j });
+    }
+  }
+
+  return handles;
+}
+
+async function tryLoadShapeText(handle: TextShapeHandle, context: PowerPoint.RequestContext): Promise<string | null> {
+  const location = describeShape(handle);
+
+  try {
+    handle.shape.textFrame.textRange.load("text, font");
+  } catch (error) {
+    console.warn(`tryLoadShapeText => unable to queue text load for ${location}`, error);
+    return null;
+  }
+
+  try {
+    await context.sync();
+  } catch (error) {
+    console.warn(`tryLoadShapeText => context sync failed for ${location}`, error);
+    return null;
+  }
+
+  try {
+    // @ts-ignore
+    return handle.shape.textFrame.textRange.text as string;
+  } catch (error) {
+    console.warn(`tryLoadShapeText => unable to read text for ${location}`, error);
+    return null;
+  }
+}
+
 export async function insertText(text: string) {
   try {
     await PowerPoint.run(async (context) => {
@@ -446,20 +504,12 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
 export async function removeReferences(): Promise<string> {
   try {
     return await PowerPoint.run(async (context) => {
-      const slides = context.presentation.slides;
-      slides.load("items/shapes/items");
-      await context.sync();
-
-      for (let slide of slides.items) {
-        for (let shape of slide.shapes.items) {
-          try {
-            shape.textFrame.textRange.load("text, font");
-          } catch (e) {
-            // Shape doesn't have text frame, skip it
-          }
-        }
+      console.log("removeReferences => start");
+      const textShapes = await loadTextCapableShapes(context);
+      console.log(`removeReferences => loaded ${textShapes.length} text-capable shapes`);
+      if (textShapes.length === 0) {
+        return "No text content available to clean";
       }
-      await context.sync();
 
       const citationPatterns = [
         /\((?:[^,()]+(,\s[^,()]+)*(?:,\sand\s[^,()]+)?)[,\s]\s?\d{4}[a-z]?\)/g,
@@ -470,37 +520,48 @@ export async function removeReferences(): Promise<string> {
       ];
 
       let totalRemoved = 0;
+      let shapesUpdated = 0;
 
-      for (let slide of slides.items) {
-        for (let shape of slide.shapes.items) {
-          try {
-            // @ts-ignore
-            if (!shape.textFrame || !shape.textFrame.textRange) continue;
+      for (const handle of textShapes) {
+        const location = describeShape(handle);
+        console.log(`removeReferences => inspecting ${location}`);
+        const text = await tryLoadShapeText(handle, context);
+        if (!text) {
+          console.warn(`removeReferences => skipping ${location} (unable to load text)`);
+          continue;
+        }
 
-            let text = shape.textFrame.textRange.text;
-            let hadMatch = false;
+        let updatedText = text;
+        let hadMatch = false;
 
-            for (const pattern of citationPatterns) {
-              const matches = text.match(pattern) || [];
-              if (matches.length > 0) {
-                text = text.replace(pattern, "").replace(/\s+\./g, ".");
-                hadMatch = true;
-                totalRemoved += matches.length;
-              }
-            }
-
-            if (hadMatch) {
-              shape.textFrame.textRange.text = text;
-              shape.textFrame.textRange.font.bold = false;
-            }
-          } catch (e) {
-            // Shape doesn't have text frame
+        for (const pattern of citationPatterns) {
+          const matches = updatedText.match(pattern) || [];
+          if (matches.length > 0) {
+            updatedText = updatedText.replace(pattern, "");
+            hadMatch = true;
+            totalRemoved += matches.length;
           }
         }
+
+        if (!hadMatch) continue;
+
+        updatedText = updatedText
+          .replace(/\s+\./g, ".")
+          .replace(/\s{2,}/g, " ")
+          .trim();
+        console.log(`removeReferences => updating ${location} (removed citations)`);
+        handle.shape.textFrame.textRange.text = updatedText;
+        handle.shape.textFrame.textRange.font.bold = false;
+        shapesUpdated++;
       }
 
       await context.sync();
-      return `Removed ${totalRemoved} citations and cleaned up formatting`;
+      console.log(`removeReferences => finished sync (totalRemoved=${totalRemoved}, shapesUpdated=${shapesUpdated})`);
+      if (totalRemoved === 0) {
+        return "No citations detected";
+      }
+
+      return `Removed ${totalRemoved} citations across ${shapesUpdated} shapes`;
     });
   } catch (error) {
     console.error("Error in removeReferences:", error);
@@ -511,57 +572,46 @@ export async function removeReferences(): Promise<string> {
 export async function removeLinks(deleteAll: boolean = false): Promise<string> {
   try {
     return await PowerPoint.run(async (context) => {
-      const slides = context.presentation.slides;
-      slides.load("items/shapes/items");
-      await context.sync();
-
-      for (let slide of slides.items) {
-        for (let shape of slide.shapes.items) {
-          try {
-            shape.textFrame.textRange.load("text");
-          } catch (e) {
-            // Shape doesn't have text frame
-          }
-        }
+      console.log("removeLinks => start", { deleteAll });
+      const textShapes = await loadTextCapableShapes(context);
+      console.log(`removeLinks => loaded ${textShapes.length} text-capable shapes`);
+      if (textShapes.length === 0) {
+        return "No text content available to scrub links";
       }
-      await context.sync();
-
-      // We need to find reference section to skip it if !deleteAll
-      // This requires building the full text map again or just iterating.
-      // For simplicity, let's iterate and check if we are in reference section.
-      // But shapes are not linear like paragraphs.
-      // We'll assume we process all shapes unless we detect we are in reference slide/shape?
-      // Implementing "skip reference section" in PPT is harder without linear structure.
-      // I'll implement simple version: remove links everywhere for now, or try to detect reference header in the shape itself.
 
       const urlRegex = /\b((https?:\/\/)?[\w.-]+(?:\.[\w.-]+)+)\b/g;
       let linksRemovedCount = 0;
 
-      for (let slide of slides.items) {
-        for (let shape of slide.shapes.items) {
-          try {
-            // @ts-ignore
-            if (!shape.textFrame || !shape.textFrame.textRange) continue;
-
-            let text = shape.textFrame.textRange.text;
-            // Skip if text looks like reference header?
-            if (!deleteAll && REFERENCE_HEADERS.some((r) => r.test(text))) {
-              continue;
-            }
-
-            const matches = text.match(urlRegex);
-            if (matches) {
-              linksRemovedCount += matches.length;
-              const newText = text.replace(urlRegex, "").replace(/\s+([.,;])/g, "$1");
-              shape.textFrame.textRange.text = newText;
-              shape.textFrame.textRange.font.bold = false;
-            }
-          } catch (e) {
-            // Shape doesn't have text frame
-          }
+      for (const handle of textShapes) {
+        const location = describeShape(handle);
+        console.log(`removeLinks => inspecting ${location}`);
+        const text = await tryLoadShapeText(handle, context);
+        if (!text) {
+          console.warn(`removeLinks => skipping ${location} (unable to load text)`);
+          continue;
         }
+
+        if (!deleteAll && REFERENCE_HEADERS.some((r) => r.test(text))) {
+          continue;
+        }
+
+        const matches = text.match(urlRegex) || [];
+        if (matches.length === 0) continue;
+
+        linksRemovedCount += matches.length;
+        const newText = text
+          .replace(urlRegex, "")
+          .replace(/\s+([.,;])/g, "$1")
+          .replace(/\s{2,}/g, " ")
+          .trim();
+
+        handle.shape.textFrame.textRange.text = newText;
+        handle.shape.textFrame.textRange.font.bold = false;
+        console.log(`removeLinks => updated ${location} (removed ${matches.length} links)`);
       }
+
       await context.sync();
+      console.log(`removeLinks => finished sync (linksRemoved=${linksRemovedCount})`);
       return `Removed ${linksRemovedCount} URL-like text snippets.`;
     });
   } catch (error) {
@@ -573,44 +623,40 @@ export async function removeLinks(deleteAll: boolean = false): Promise<string> {
 export async function removeWeirdNumbers(): Promise<string> {
   try {
     return await PowerPoint.run(async (context) => {
-      const slides = context.presentation.slides;
-      slides.load("items/shapes/items");
-      await context.sync();
-
-      for (let slide of slides.items) {
-        for (let shape of slide.shapes.items) {
-          try {
-            shape.textFrame.textRange.load("text");
-          } catch (e) {
-            // Shape doesn't have text frame
-          }
-        }
+      console.log("removeWeirdNumbers => start");
+      const textShapes = await loadTextCapableShapes(context);
+      console.log(`removeWeirdNumbers => loaded ${textShapes.length} text-capable shapes`);
+      if (textShapes.length === 0) {
+        return "No text content available to clean";
       }
-      await context.sync();
 
       const weirdNumberPattern = /[【[]\d+.*?[†+t].*?[】\]]\S*/g;
       let totalRemoved = 0;
 
-      for (let slide of slides.items) {
-        for (let shape of slide.shapes.items) {
-          try {
-            // @ts-ignore
-            if (!shape.textFrame || !shape.textFrame.textRange) continue;
-
-            let text = shape.textFrame.textRange.text;
-            const matches = text.match(weirdNumberPattern);
-            if (matches && matches.length > 0) {
-              totalRemoved += matches.length;
-              const newText = text.replace(weirdNumberPattern, "").replace(/\s{2,}/g, " ");
-              shape.textFrame.textRange.text = newText;
-              shape.textFrame.textRange.font.bold = false;
-            }
-          } catch (e) {
-            // Shape doesn't have text frame
-          }
+      for (const handle of textShapes) {
+        const location = describeShape(handle);
+        console.log(`removeWeirdNumbers => inspecting ${location}`);
+        const text = await tryLoadShapeText(handle, context);
+        if (!text) {
+          console.warn(`removeWeirdNumbers => skipping ${location} (unable to load text)`);
+          continue;
         }
+
+        const matches = text.match(weirdNumberPattern) || [];
+        if (matches.length === 0) continue;
+
+        totalRemoved += matches.length;
+        const newText = text
+          .replace(weirdNumberPattern, "")
+          .replace(/\s{2,}/g, " ")
+          .trim();
+        handle.shape.textFrame.textRange.text = newText;
+        handle.shape.textFrame.textRange.font.bold = false;
+        console.log(`removeWeirdNumbers => updated ${location} (removed ${matches.length} tokens)`);
       }
+
       await context.sync();
+      console.log(`removeWeirdNumbers => finished sync (totalRemoved=${totalRemoved})`);
       return `Removed ${totalRemoved} weird number instances.`;
     });
   } catch (error) {
