@@ -5,6 +5,9 @@ import {
   analyzeDocument as analyzeDocumentInPowerPoint,
   insertText as insertTextInPowerPoint,
   removeReferences as removeReferencesInPowerPoint,
+  removeLinks as removeLinksInPowerPoint,
+  removeWeirdNumbers as removeWeirdNumbersInPowerPoint,
+  paraphraseSelectedText as paraphraseSelectedTextInPowerPoint,
 } from "./powerpoint";
 import { insertText as insertTextInProject } from "./project";
 import {
@@ -52,7 +55,7 @@ export async function analyzeDocument(insertEveryOther: boolean = false) {
     case Office.HostType.Word:
       return await analyzeDocumentInWord(insertEveryOther);
     case Office.HostType.PowerPoint:
-      return await analyzeDocumentInPowerPoint();
+      return await analyzeDocumentInPowerPoint(insertEveryOther);
     default:
       throw new Error("This function is only available in Word and PowerPoint");
   }
@@ -76,8 +79,9 @@ export async function removeLinks(deleteAll: boolean = false) {
     case Office.HostType.Word:
       return await removeLinksInWord(deleteAll);
     case Office.HostType.PowerPoint:
+      return await removeLinksInPowerPoint(deleteAll);
     default:
-      throw new Error("This function is only available in Word");
+      throw new Error("This function is only available in Word and PowerPoint");
   }
 }
 
@@ -86,8 +90,10 @@ export async function removeWeirdNumbers() {
   switch (Office.context.host) {
     case Office.HostType.Word:
       return await removeWeirdNumbersInWord();
+    case Office.HostType.PowerPoint:
+      return await removeWeirdNumbersInPowerPoint();
     default:
-      throw new Error("This function is only available in Word");
+      throw new Error("This function is only available in Word and PowerPoint");
   }
 }
 
@@ -96,7 +102,9 @@ export async function paraphraseSelectedText() {
   switch (Office.context.host) {
     case Office.HostType.Word:
       return await paraphraseSelectedTextInWord();
+    case Office.HostType.PowerPoint:
+      return await paraphraseSelectedTextInPowerPoint();
     default:
-      throw new Error("This function is only available in Word");
+      throw new Error("This function is only available in Word and PowerPoint");
   }
 }
