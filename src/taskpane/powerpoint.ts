@@ -23,8 +23,11 @@ const CONCLUSION_HEADERS = [
 ];
 
 type ShapeMeta = {
+  slideId: string;
   slideIndex: number;
   shapeId: string;
+  shapeIndex: number;
+  shapeType: string;
   text: string;
   wordCount: number;
   isTitle: boolean;
@@ -164,8 +167,36 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
     return await PowerPoint.run(async (context) => {
       console.log("analyzeDocument => start", { insertEveryOther });
       const slides = context.presentation.slides;
-      // Load all text from all shapes in all slides
-      slides.load("items/shapes/items/textFrame/textRange/text, items/shapes/items/id, items/shapes/items/type");
+
+      // Load basic properties first to identify shapes with text
+      slides.load("items/id, items/shapes/items/id, items/shapes/items/type");
+      await context.sync();
+
+      console.log("analyzeDocument => slides count", slides.items.length);
+
+      // Queue up text loading for shapes that can contain text
+      // Only load text for shape types that support text frames
+      const TEXT_SHAPE_TYPES = ["GeometricShape", "TextBox", "Group"];
+
+      let totalShapesCount = 0;
+      let shapesWithTextFrameCount = 0;
+      for (let slide of slides.items) {
+        console.log(`analyzeDocument => slide shapes count: ${slide.shapes.items.length}`);
+        for (let shape of slide.shapes.items) {
+          totalShapesCount++;
+          console.log(`analyzeDocument => shape id: ${shape.id}, type: ${shape.type}`);
+
+          // Only try to load text for shapes that can have text
+          if (TEXT_SHAPE_TYPES.includes(shape.type)) {
+            shape.textFrame.textRange.load("text");
+            shapesWithTextFrameCount++;
+            console.log(`analyzeDocument => queued text load for shape ${shape.id}`);
+          } else {
+            console.log(`analyzeDocument => skipping shape ${shape.id} (type: ${shape.type} cannot have text)`);
+          }
+        }
+      }
+      console.log(`analyzeDocument => total shapes: ${totalShapesCount}, queued for text: ${shapesWithTextFrameCount}`);
       await context.sync();
 
       const metas: ShapeMeta[] = [];
@@ -176,29 +207,39 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
         const slide = slides.items[i];
         for (let j = 0; j < slide.shapes.items.length; j++) {
           const shape = slide.shapes.items[j];
+
           let text = "";
           try {
             // @ts-ignore
-            text = shape.textFrame ? shape.textFrame.textRange.text : "";
+            text = shape.textFrame.textRange.text;
+            console.log(`analyzeDocument => shape text length: ${text.length}, preview: "${text.substring(0, 50)}"`);
           } catch (e) {
+            console.log(`analyzeDocument => skipping shape without text at slide ${i}, shape ${j}: ${e}`);
             continue;
           }
 
           text = text.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+          console.log(`analyzeDocument => after trim, text length: ${text.length}`);
           if (text) {
             const words = text.split(/\s+/).filter(Boolean);
-            // Heuristic: if it's the first shape on slide and short, maybe title?
-            // Or check shape type if possible.
             const isTitle = j === 0 && words.length < 10;
 
             metas.push({
+              slideId: slide.id,
               slideIndex: i,
               shapeId: shape.id,
+              shapeIndex: j,
+              shapeType: shape.type,
               text,
               wordCount: words.length,
               isTitle,
               index: globalIndex++,
             });
+            console.log(
+              `analyzeDocument => added meta: wordCount=${words.length}, isTitle=${isTitle}, index=${globalIndex - 1}`
+            );
+          } else {
+            console.log(`analyzeDocument => skipping empty text at slide ${i}, shape ${j}`);
           }
         }
       }
@@ -266,7 +307,6 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
       }
 
       // Sentence-level injection logic
-      // Since we can't easily get sentence ranges in PPT, we'll work with text splitting
       type SentenceSlot = {
         meta: ShapeMeta;
         sentenceIndex: number;
@@ -305,11 +345,6 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
         }
       }
 
-      // Limit per paragraph (shape) logic is tricky here because we flattened slots.
-      // But we can shuffle all slots and then enforce limit when applying?
-      // Or group slots by meta first.
-
-      // Let's group slots by meta to enforce 0-3 limit
       const slotsByMeta = new Map<ShapeMeta, SentenceSlot[]>();
       for (const slot of allSlots) {
         if (!slotsByMeta.has(slot.meta)) slotsByMeta.set(slot.meta, []);
@@ -331,8 +366,6 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
 
       const usedReferences = new Set<number>();
 
-      // We need to apply changes. Since multiple slots might be in same shape, we need to be careful.
-      // We should group final slots by meta again to apply all changes to a shape at once.
       const changesByMeta = new Map<ShapeMeta, Map<number, string>>(); // meta -> (sentenceIndex -> newText)
 
       for (const slot of finalSlots) {
@@ -352,29 +385,56 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
         changesByMeta.get(slot.meta).set(slot.sentenceIndex, newSentence);
       }
 
-      // Apply changes
-      Array.from(changesByMeta.entries()).forEach(([meta, changes]) => {
-        const sentences = sentencesByMeta.get(meta);
-        if (!sentences) return;
+      // Apply changes sequentially, per shape, to identify problematic slides precisely
+      console.log("analyzeDocument => applying changes to shapes");
+      const slidesById = new Map(slides.items.map((slide) => [slide.id, slide]));
+      const entries = Array.from(changesByMeta.entries());
 
-        // Reconstruct text
+      for (const [meta, changes] of entries) {
+        const sentences = sentencesByMeta.get(meta);
+        if (!sentences) continue;
+
+        const slide = slidesById.get(meta.slideId);
+        if (!slide) {
+          console.warn(`analyzeDocument => slide not found for meta slideId=${meta.slideId}`);
+          continue;
+        }
+
+        let shape: PowerPoint.Shape;
+        try {
+          shape = slide.shapes.getItem(meta.shapeId);
+        } catch (error) {
+          console.error(`analyzeDocument => unable to fetch shape ${meta.shapeId} on slide ${meta.slideId}`, error);
+          continue;
+        }
+
         const newSentences = sentences.map((s, i) => (changes.has(i) ? changes.get(i) : s));
         const reconstructedText = newSentences.join("");
 
-        // Find the shape and update it
-        const slide = slides.items[meta.slideIndex];
-        // We need to find shape by ID.
-        // We can iterate shapes again or use `getItem(id)` if available.
-        // `slide.shapes.getItem(id)` exists.
-        const shape = slide.shapes.getItem(meta.shapeId);
-        // We need to load textFrame again to write? No, just write.
-        // But we need to make sure we are writing to textRange.
-        shape.textFrame.textRange.text = reconstructedText;
-        // Unbold
-        shape.textFrame.textRange.font.bold = false;
-      });
+        console.log(`analyzeDocument => loading shape ${meta.shapeId} (slide ${meta.slideId}) before update`);
+        try {
+          shape.textFrame.textRange.load("text");
+          await context.sync();
+        } catch (error) {
+          console.error(`analyzeDocument => failed loading shape ${meta.shapeId}`, error);
+          continue;
+        }
 
-      await context.sync();
+        console.log(
+          `analyzeDocument => updating slide ${meta.slideIndex} (${meta.slideId}), shape ${meta.shapeIndex} (${meta.shapeId}), type=${meta.shapeType}`
+        );
+        try {
+          // @ts-ignore
+          shape.textFrame.textRange.text = reconstructedText;
+          // @ts-ignore
+          shape.textFrame.textRange.font.bold = false;
+          await context.sync();
+        } catch (error) {
+          console.error(`analyzeDocument => failed to apply update for shape ${meta.shapeId}`, error);
+        }
+      }
+
+      console.log("analyzeDocument => changes applied successfully");
       return "References added successfully";
     });
   } catch (error) {
@@ -387,7 +447,18 @@ export async function removeReferences(): Promise<string> {
   try {
     return await PowerPoint.run(async (context) => {
       const slides = context.presentation.slides;
-      slides.load("items/shapes/items/textFrame/textRange/text, items/shapes/items/textFrame/textRange/font");
+      slides.load("items/shapes/items");
+      await context.sync();
+
+      for (let slide of slides.items) {
+        for (let shape of slide.shapes.items) {
+          try {
+            shape.textFrame.textRange.load("text, font");
+          } catch (e) {
+            // Shape doesn't have text frame, skip it
+          }
+        }
+      }
       await context.sync();
 
       const citationPatterns = [
@@ -402,8 +473,10 @@ export async function removeReferences(): Promise<string> {
 
       for (let slide of slides.items) {
         for (let shape of slide.shapes.items) {
-          // @ts-ignore
-          if (shape.textFrame && shape.textFrame.textRange) {
+          try {
+            // @ts-ignore
+            if (!shape.textFrame || !shape.textFrame.textRange) continue;
+
             let text = shape.textFrame.textRange.text;
             let hadMatch = false;
 
@@ -420,6 +493,8 @@ export async function removeReferences(): Promise<string> {
               shape.textFrame.textRange.text = text;
               shape.textFrame.textRange.font.bold = false;
             }
+          } catch (e) {
+            // Shape doesn't have text frame
           }
         }
       }
@@ -437,7 +512,18 @@ export async function removeLinks(deleteAll: boolean = false): Promise<string> {
   try {
     return await PowerPoint.run(async (context) => {
       const slides = context.presentation.slides;
-      slides.load("items/shapes/items/textFrame/textRange/text");
+      slides.load("items/shapes/items");
+      await context.sync();
+
+      for (let slide of slides.items) {
+        for (let shape of slide.shapes.items) {
+          try {
+            shape.textFrame.textRange.load("text");
+          } catch (e) {
+            // Shape doesn't have text frame
+          }
+        }
+      }
       await context.sync();
 
       // We need to find reference section to skip it if !deleteAll
@@ -453,8 +539,10 @@ export async function removeLinks(deleteAll: boolean = false): Promise<string> {
 
       for (let slide of slides.items) {
         for (let shape of slide.shapes.items) {
-          // @ts-ignore
-          if (shape.textFrame && shape.textFrame.textRange) {
+          try {
+            // @ts-ignore
+            if (!shape.textFrame || !shape.textFrame.textRange) continue;
+
             let text = shape.textFrame.textRange.text;
             // Skip if text looks like reference header?
             if (!deleteAll && REFERENCE_HEADERS.some((r) => r.test(text))) {
@@ -468,6 +556,8 @@ export async function removeLinks(deleteAll: boolean = false): Promise<string> {
               shape.textFrame.textRange.text = newText;
               shape.textFrame.textRange.font.bold = false;
             }
+          } catch (e) {
+            // Shape doesn't have text frame
           }
         }
       }
@@ -484,7 +574,18 @@ export async function removeWeirdNumbers(): Promise<string> {
   try {
     return await PowerPoint.run(async (context) => {
       const slides = context.presentation.slides;
-      slides.load("items/shapes/items/textFrame/textRange/text");
+      slides.load("items/shapes/items");
+      await context.sync();
+
+      for (let slide of slides.items) {
+        for (let shape of slide.shapes.items) {
+          try {
+            shape.textFrame.textRange.load("text");
+          } catch (e) {
+            // Shape doesn't have text frame
+          }
+        }
+      }
       await context.sync();
 
       const weirdNumberPattern = /[【[]\d+.*?[†+t].*?[】\]]\S*/g;
@@ -492,8 +593,10 @@ export async function removeWeirdNumbers(): Promise<string> {
 
       for (let slide of slides.items) {
         for (let shape of slide.shapes.items) {
-          // @ts-ignore
-          if (shape.textFrame && shape.textFrame.textRange) {
+          try {
+            // @ts-ignore
+            if (!shape.textFrame || !shape.textFrame.textRange) continue;
+
             let text = shape.textFrame.textRange.text;
             const matches = text.match(weirdNumberPattern);
             if (matches && matches.length > 0) {
@@ -502,6 +605,8 @@ export async function removeWeirdNumbers(): Promise<string> {
               shape.textFrame.textRange.text = newText;
               shape.textFrame.textRange.font.bold = false;
             }
+          } catch (e) {
+            // Shape doesn't have text frame
           }
         }
       }
