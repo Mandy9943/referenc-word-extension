@@ -763,7 +763,7 @@ export async function paraphraseDocument(): Promise<string> {
       console.log("=== END OF PAYLOAD ===");
 
       // Send to QuillBot API with frozen delimiter
-      const response = await fetch("http://localhost:3090/paraphrase", {
+      const response = await fetch("https://analizeai.com/paraphrase", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
