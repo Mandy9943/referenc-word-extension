@@ -4,16 +4,16 @@ import { insertText as insertTextInOutlook } from "./outlook";
 import {
   analyzeDocument as analyzeDocumentInPowerPoint,
   insertText as insertTextInPowerPoint,
-  removeReferences as removeReferencesInPowerPoint,
-  removeLinks as removeLinksInPowerPoint,
-  removeWeirdNumbers as removeWeirdNumbersInPowerPoint,
   paraphraseSelectedText as paraphraseSelectedTextInPowerPoint,
+  removeLinks as removeLinksInPowerPoint,
+  removeReferences as removeReferencesInPowerPoint,
+  removeWeirdNumbers as removeWeirdNumbersInPowerPoint,
 } from "./powerpoint";
 import { insertText as insertTextInProject } from "./project";
 import {
   analyzeDocument as analyzeDocumentInWord,
   insertText as insertTextInWord,
-  paraphraseSelectedText as paraphraseSelectedTextInWord,
+  paraphraseDocument as paraphraseDocumentInWord,
   removeLinks as removeLinksInWord,
   removeReferences as removeReferencesInWord,
   removeWeirdNumbers as removeWeirdNumbersInWord,
@@ -101,7 +101,7 @@ export async function paraphraseSelectedText() {
   await Office.onReady();
   switch (Office.context.host) {
     case Office.HostType.Word:
-      return await paraphraseSelectedTextInWord();
+      return await paraphraseDocumentInWord();
     case Office.HostType.PowerPoint:
       return await paraphraseSelectedTextInPowerPoint();
     default:

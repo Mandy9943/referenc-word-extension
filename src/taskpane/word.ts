@@ -469,6 +469,9 @@ export async function removeReferences(): Promise<string> {
 
       // Updated citation patterns to be more precise
       const citationPatterns = [
+        // Square bracket citations: [Harvard DCE, 2025], [Author, 2024], etc.
+        /\[(?:[^\]]+)[,\s]\s?\d{4}[a-z]?\]/g,
+
         // Multiple authors with 'and' and commas - non-greedy match
         /\((?:[^,()]+(,\s[^,()]+)*(?:,\sand\s[^,()]+)?)[,\s]\s?\d{4}[a-z]?\)/g, // Added [a-z]? to handle letter suffixes
 
@@ -644,6 +647,172 @@ export async function removeWeirdNumbers(): Promise<string> {
 }
 
 /**
+ * Paraphrase all body paragraphs in the document using the local API
+ */
+interface ParaphraseParagraphMeta {
+  id: string;
+  text: string;
+}
+
+const PARAPHRASE_DELIMITER = "qbpdelim123";
+
+export async function paraphraseDocument(): Promise<string> {
+  try {
+    return await Word.run(async (context) => {
+      console.log("Starting document paraphrase...");
+
+      const paragraphs = context.document.body.paragraphs;
+      paragraphs.load("items/text, items/outlineLevel, items/uniqueLocalId");
+      await context.sync();
+
+      // First pass: identify reference section
+      let referenceStartIndex = -1;
+      for (let i = paragraphs.items.length - 1; i >= 0; i--) {
+        const text = paragraphs.items[i].text ? paragraphs.items[i].text.trim() : "";
+        if (REFERENCE_HEADERS.some((regex) => regex.test(text))) {
+          referenceStartIndex = i;
+          console.log(`Found reference section at index ${i}: "${text}"`);
+          break;
+        }
+      }
+
+      const metas: ParaphraseParagraphMeta[] = [];
+
+      for (let i = 0; i < paragraphs.items.length; i++) {
+        const p = paragraphs.items[i];
+        const text = p.text ? p.text.trim() : "";
+        if (!text) continue;
+
+        // Skip paragraphs in or after reference section
+        if (referenceStartIndex !== -1 && i >= referenceStartIndex) {
+          console.log(`Skipping paragraph in reference section (index: ${i}): "${text.substring(0, 50)}..."`);
+          continue;
+        }
+
+        // Skip very short paragraphs (likely titles/headings)
+        const wordCount = text.split(/\s+/).filter(Boolean).length;
+        if (wordCount < 15) {
+          console.log(`Skipping short paragraph (${wordCount} words): "${text}"`);
+          continue;
+        }
+
+        // Skip headings/titles - only include body text paragraphs
+        // In Word API, outlineLevel 10 = body text, other numbers (1-9) = heading levels
+        const outlineLevel = typeof p.outlineLevel === "number" ? p.outlineLevel : Number(p.outlineLevel);
+        const isBody = outlineLevel === 10;
+
+        if (!isBody) {
+          console.log(`Skipping non-body paragraph (outlineLevel: ${p.outlineLevel}): "${text.substring(0, 50)}..."`);
+          continue;
+        }
+
+        metas.push({
+          id: p.uniqueLocalId,
+          text: p.text,
+        });
+      }
+
+      if (metas.length === 0) {
+        return "No body paragraphs found to paraphrase.";
+      }
+
+      console.log(`Found ${metas.length} body paragraphs to paraphrase.`);
+
+      // Build payload with delimiter between paragraphs
+      const chunks: string[] = [];
+      for (const meta of metas) {
+        chunks.push(PARAPHRASE_DELIMITER);
+        chunks.push(meta.text);
+      }
+      const payloadText = chunks.join("\n\n");
+
+      console.log(
+        `Sending ${payloadText.length} characters to paraphrase API with frozen delimiter: ${PARAPHRASE_DELIMITER}`
+      );
+      console.log("=== COMPLETE PAYLOAD BEING SENT ===");
+      console.log(payloadText);
+      console.log("=== END OF PAYLOAD ===");
+
+      // Send to QuillBot API with frozen delimiter
+      const response = await fetch("http://localhost:3090/paraphrase", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ text: payloadText, freeze: [PARAPHRASE_DELIMITER] }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`API request failed with status ${response.status}`);
+      }
+
+      const data = await response.json();
+      const paraphrasedWholeText = data.secondMode;
+
+      if (!paraphrasedWholeText) {
+        throw new Error("Invalid response from paraphrase API");
+      }
+
+      console.log("=== COMPLETE RESPONSE RECEIVED ===");
+      console.log(paraphrasedWholeText);
+      console.log("=== END OF RESPONSE ===");
+
+      // Parse response by splitting on the frozen delimiter
+      const parts = paraphrasedWholeText
+        .split(new RegExp(`\\b${PARAPHRASE_DELIMITER}\\b`, "i"))
+        .map((x: string) => x.trim())
+        .filter((x: string) => x.length > 0);
+
+      console.log(`Received ${parts.length} paraphrased parts from API.`);
+      console.log("=== PARSED PARTS ===");
+      parts.forEach((part, index) => {
+        console.log(`Part ${index + 1}:`, part);
+      });
+      console.log("=== END OF PARSED PARTS ===");
+
+      if (parts.length !== metas.length) {
+        console.error(`Mismatch: sent ${metas.length} paragraphs, received ${parts.length} parts`);
+        throw new Error(
+          `Paraphrase count mismatch. Sent ${metas.length}, received ${parts.length}. Aborting to prevent data loss.`
+        );
+      }
+
+      // Re-fetch paragraphs to ensure validity and apply changes
+      const paragraphsToUpdate = context.document.body.paragraphs;
+      paragraphsToUpdate.load("items/uniqueLocalId");
+      await context.sync();
+
+      const paragraphById = new Map<string, Word.Paragraph>();
+      paragraphsToUpdate.items.forEach((p) => {
+        paragraphById.set(p.uniqueLocalId, p);
+      });
+
+      let updatedCount = 0;
+      for (let i = 0; i < metas.length; i++) {
+        const meta = metas[i];
+        const newText = parts[i];
+        const p = paragraphById.get(meta.id);
+
+        if (p) {
+          p.insertText(newText, Word.InsertLocation.replace);
+          updatedCount++;
+          console.log(`Updated paragraph ${i + 1}/${metas.length}`);
+        } else {
+          console.warn(`Could not find paragraph with ID ${meta.id}`);
+        }
+      }
+
+      await context.sync();
+      console.log(`Paraphrase complete. Updated ${updatedCount}/${metas.length} paragraphs.`);
+      return `Successfully paraphrased ${updatedCount} body paragraphs.`;
+    });
+  } catch (error) {
+    console.error("Error in paraphraseDocument:", error);
+    throw new Error(`Error paraphrasing document: ${error.message}`);
+  }
+}
+
+/**
  * Paraphrase selected text using the local API
  */
 export async function paraphraseSelectedText(): Promise<string> {
@@ -662,7 +831,7 @@ export async function paraphraseSelectedText(): Promise<string> {
       }
 
       // Call the paraphrase API
-      const response = await fetch("https://analizeai.com/paraphrase", {
+      const response = await fetch("http://localhost:3090/paraphrase", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
