@@ -367,14 +367,43 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
         }
       }
 
-      if (eligibleIndexes.length === 0) {
-        console.warn("analyzeDocument => abort: no eligible paragraphs");
-        return "No eligible paragraphs found for inserting references";
+      // NEW: Exclude all paragraphs on the first page
+      // Calculate approximate first page end by cumulative character count
+      // Typically a page is ~500-700 words or ~3000-4000 characters
+      let firstPageEndIndex = -1;
+      let cumulativeChars = 0;
+      const FIRST_PAGE_CHAR_THRESHOLD = 1500; // Approximate characters per page
+
+      for (let i = 0; i < metas.length; i++) {
+        cumulativeChars += metas[i].text.length;
+        if (cumulativeChars > FIRST_PAGE_CHAR_THRESHOLD) {
+          firstPageEndIndex = i;
+          break;
+        }
       }
-      console.log("analyzeDocument => eligible count", eligibleIndexes.length);
+
+      // Filter out paragraphs that are likely on the first page
+      const firstPageParagraphIndexes = new Set<number>();
+      for (const idx of eligibleIndexes) {
+        if (firstPageEndIndex !== -1 && idx <= firstPageEndIndex) {
+          firstPageParagraphIndexes.add(idx);
+        }
+      }
+
+      // Remove first page paragraphs from eligible indexes
+      const filteredIndexes = eligibleIndexes.filter((idx) => !firstPageParagraphIndexes.has(idx));
+      console.log(
+        `analyzeDocument => excluded ${firstPageParagraphIndexes.size} paragraphs from first page (up to index ${firstPageEndIndex})`
+      );
+
+      if (filteredIndexes.length === 0) {
+        console.warn("analyzeDocument => abort: no eligible paragraphs after excluding first page");
+        return "No eligible paragraphs found for inserting references (all content on first page)";
+      }
+      console.log("analyzeDocument => eligible count after first page filter", filteredIndexes.length);
 
       // If insertEveryOther is true, only use every other paragraph
-      let targetIndexes = [...eligibleIndexes];
+      let targetIndexes = [...filteredIndexes];
       if (insertEveryOther && targetIndexes.length > 0) {
         // Sort available indexes to ensure we're working with ordered paragraphs
         targetIndexes.sort((a, b) => a - b);
