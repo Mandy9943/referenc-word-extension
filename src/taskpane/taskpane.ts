@@ -4,7 +4,8 @@ import { insertText as insertTextInOutlook } from "./outlook";
 import {
   analyzeDocument as analyzeDocumentInPowerPoint,
   insertText as insertTextInPowerPoint,
-  paraphraseSelectedText as paraphraseSelectedTextInPowerPoint,
+  normalizeBodyBold as normalizeBodyBoldInPowerPoint,
+  paraphraseDocument as paraphraseDocumentInPowerPoint,
   removeLinks as removeLinksInPowerPoint,
   removeReferences as removeReferencesInPowerPoint,
   removeWeirdNumbers as removeWeirdNumbersInPowerPoint,
@@ -13,6 +14,7 @@ import { insertText as insertTextInProject } from "./project";
 import {
   analyzeDocument as analyzeDocumentInWord,
   insertText as insertTextInWord,
+  normalizeBodyBold as normalizeBodyBoldInWord,
   paraphraseDocument as paraphraseDocumentInWord,
   removeLinks as removeLinksInWord,
   removeReferences as removeReferencesInWord,
@@ -103,7 +105,19 @@ export async function paraphraseSelectedText() {
     case Office.HostType.Word:
       return await paraphraseDocumentInWord();
     case Office.HostType.PowerPoint:
-      return await paraphraseSelectedTextInPowerPoint();
+      return await paraphraseDocumentInPowerPoint();
+    default:
+      throw new Error("This function is only available in Word and PowerPoint");
+  }
+}
+
+export async function normalizeBoldText() {
+  await Office.onReady();
+  switch (Office.context.host) {
+    case Office.HostType.Word:
+      return await normalizeBodyBoldInWord();
+    case Office.HostType.PowerPoint:
+      return await normalizeBodyBoldInPowerPoint();
     default:
       throw new Error("This function is only available in Word and PowerPoint");
   }

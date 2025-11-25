@@ -5,12 +5,31 @@ import { insertText } from "../../src/taskpane/powerpoint";
 
 /* global describe, global, it */
 
-const shapes = [];
+const shapes: any[] = [];
+
+function createMockTextBox(text: string) {
+  const shape = {
+    text,
+    fill: {
+      setSolidColor: function () {
+        /* no-op */
+      },
+    },
+    lineFormat: {
+      color: "",
+      weight: 0,
+      dashStyle: "",
+    },
+  };
+
+  shapes.push(shape);
+  return shape;
+}
+
 const selectedSlide = {
   shapes: {
-    addTextBox: function (text) {
-      const shape = { text };
-      shapes.push(shape);
+    addTextBox: function (text: string) {
+      return createMockTextBox(text);
     },
     items: shapes,
   },
@@ -20,11 +39,15 @@ const PowerPointMockData = {
     presentation: {
       getSelectedSlides: function () {
         return {
-          getItemAt: function () {
-            return selectedSlide;
+          load: function () {
+            /* no-op */
           },
+          items: [selectedSlide],
         };
       },
+    },
+    sync: async function () {
+      /* no-op */
     },
     slides: {
       items: [selectedSlide],
@@ -39,6 +62,7 @@ const PowerPointMockData = {
 describe(`PowerPoint`, function () {
   it("Inserts text", async function () {
     const officeMock = new OfficeMockObject(PowerPointMockData);
+    (officeMock as any).ShapeLineDashStyle = { solid: "solid" };
     global.PowerPoint = officeMock as any;
 
     await insertText("Hello PowerPoint");

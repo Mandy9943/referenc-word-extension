@@ -20,7 +20,7 @@ Essay Manager is a Word and PowerPoint task pane add‑in that helps writers cle
 | --- | --- | --- | --- |
 | **Add References** (`analyzeDocument`) | ✅ | ✅ | Detects the “Reference List” section, reformats entries with Gemini, and weaves randomized `(Author, Year)` citations back into paragraph text or shapes while skipping headings/TOC entries. |
 | **Clean Document** (`removeReferences`, `removeLinks`, `removeWeirdNumbers`) | ✅ | ⚪️ | Sequentially removes inline citations, URL-like strings outside the references section, and clipboard artifacts such as ``. |
-| **Paraphrase Selection** (`paraphraseSelectedText`) | ✅ | ⚪️ | Sends the user’s selection to AnalizeAI, then replaces the range with the returned `secondMode` paraphrase while tracking elapsed time. |
+| **Paraphrase Document** (`paraphraseDocument`) | ✅ | ✅ | Sends all eligible body paragraphs or text shapes to AnalizeAI, then replaces them with the returned `secondMode` paraphrase while skipping headings, titles, and reference sections. |
 | **Insert Text helpers** (`insertText`) | ✅ | ✅ | Demo helpers per host used by tests and potential ribbon commands. |
 
 > ⚪️ = feature not available on that host yet. The add-in automatically checks `Office.context.host` before executing a command to avoid unsupported scenarios.
@@ -36,7 +36,7 @@ Essay Manager is a Word and PowerPoint task pane add‑in that helps writers cle
 	- `powerpoint.ts` iterates slides/shapes, loads each `textFrame`, and performs similar reference injection logic adapted to shapes.
 4. **AI helpers** – Utility modules encapsulate third-party services:
 	- `gemini.ts` formats reference blocks using Google Generative AI (Gemini 2.5 Flash Lite).
-	- `paraphraseSelectedText` POSTs to `https://analizeai.com/paraphrase` and uses the `secondMode` field.
+	- The Word/PowerPoint paraphrase routines POST to `https://analizeai.com/paraphrase`, preserving a frozen delimiter so each returned `secondMode` block maps back to the originating paragraph or shape.
 5. **Feedback loop** – The React layer shows loading / success / error banners, a stopwatch for long paraphrase calls, and automatically resets UI state once asynchronous work finishes.
 
 ### Notable implementation details
@@ -50,7 +50,7 @@ Essay Manager is a Word and PowerPoint task pane add‑in that helps writers cle
 | Button | Visible behavior | Under the hood |
 | --- | --- | --- |
 | **Clean** | Single magenta button; status pill switches from “Processing…” to green success (or red error) after the pipeline finishes. | 1) `removeReferences()` loops through every paragraph, matches APA-like inline citations with several regexes, removes them, and fixes doubled spaces/periods.<br>2) `removeLinks(false)` rebuilds the paragraph list, slices everything **before** the references section, and strips bare URLs using a boundary-aware regex so punctuation stays intact.<br>3) `removeWeirdNumbers()` looks for clipboard artifacts such as ``, deletes them, and normalizes whitespace. Each function runs inside its own `Word.run`, so text is updated immediately before the next stage begins. |
-| **Paraphrase** | Lilac button that requires highlighted text. A stopwatch under the buttons ticks every 100 ms until the request resolves; status messaging mirrors success/error. | 1) `Word.run` loads `context.document.getSelection()` and bails out if it’s empty.<br>2) Sends `fetch("https://analizeai.com/paraphrase")` with `{ text: <selected> }` JSON; no auth keys needed.<br>3) Parses the JSON payload, pulls `secondMode`, and if it exists, calls `selection.insertText(..., Word.InsertLocation.replace)` to swap the text in-place.<br>4) Timer uses `setInterval`/`clearInterval` in React state so users see exactly how long the remote call took. |
+| **Paraphrase** | Lilac button paraphrases the entire Word document or PowerPoint presentation; no selection required. The stopwatch under the buttons still tracks elapsed API time for transparency. | 1) The host-specific routine (`paraphraseDocument`) enumerates all paragraphs/shapes, skips headings, titles, short snippets, and anything inside/after the references slide/section, and builds a delimiter-separated payload.<br>2) Issues `fetch("https://analizeai.com/paraphrase")` with `{ text, freeze: ["qbpdelim123"] }` so the response can be split safely.<br>3) Validates that the returned `secondMode` block count matches the number of eligible paragraphs/shapes; if so, replaces each text range and clears bold formatting.<br>4) React timer logic mirrors the long-running action status so users know how long the paraphrase call took. |
 | **Add References** | Green primary button with a helper checkbox “Insert references every other paragraph”. When done, the status pill announces success and Word/PowerPoint content now contains inline citations. | 1) `Word.run` (or `PowerPoint.run`) loads every paragraph/shape, building a plain-text copy of the whole document/presentation.<br>2) Searches from the bottom up for any header variant (“Reference List”, “REFERENCES”, etc.); if none are found the action exits early.<br>3) Slices the text from that header to the end and feeds the raw block to `getFormattedReferences()`, which calls Gemini 2.5 Flash Lite. The AI responds with blank-line-separated `(Author, Year)` entries that we split and trim.<br>4) Builds a list of eligible paragraphs by excluding anything shorter than 11 words, ending with `:`, or matching TOC patterns (dot leaders or tabbed page numbers). If the checkbox is checked, the code keeps only every other eligible index to reduce density.<br>5) Randomizes the eligible index list, then for each target paragraph inserts one of the formatted citations at the end (or before the trailing period). Used citations are tracked so Gemini outputs are reused evenly before repeating. PowerPoint follows the same steps but operates on shape text ranges instead of body paragraphs. |
 
 No other buttons are wired today—there is intentionally **no** humanize or DeepSeek functionality left in the codebase, which keeps configuration limited to Gemini + AnalizeAI.
@@ -60,7 +60,7 @@ No other buttons are wired today—there is intentionally **no** humanize or Dee
 | Service | File(s) | Purpose | Required variables |
 | --- | --- | --- | --- |
 | Google Generative AI (Gemini 2.5 Flash Lite) | `src/taskpane/gemini.ts` | Rewrites raw reference sections into `(Author, Year)` snippets. | `GEMINI_API_KEY` |
-| AnalizeAI paraphrase API | `src/taskpane/word.ts` | Remotely paraphrases the current text selection. | _none_ (public HTTPS call) |
+| AnalizeAI paraphrase API | `src/taskpane/word.ts`, `src/taskpane/powerpoint.ts` | Remotely paraphrases eligible body text or shapes. | _none_ (public HTTPS call) |
 
 Create a `.env` (or `.env.local`) in the project root before running dev builds:
 
@@ -109,7 +109,7 @@ GEMINI_API_KEY=AIza...
 2. Choose an action:
 	- **Add References** – Optionally enable *Insert references every other paragraph*, then press the green button. The add-in reads the document, calls Gemini to normalize references, and injects citations while logging progress to the console for troubleshooting.
 	- **Clean** – Runs `removeReferences`, `removeLinks`, and `removeWeirdNumbers` in sequence. Useful after pasting AI output or bibliographies from PDFs.
-	- **Paraphrase** – Highlight text, click **Paraphrase**, and watch the live stopwatch until the AnalizeAI response replaces the selection.
+	- **Paraphrase** – Click **Paraphrase** to rewrite every eligible paragraph (Word) or text shape (PowerPoint). The live stopwatch shows how long the AnalizeAI round-trip takes while references, headings, and short titles are automatically skipped.
 3. Review the status indicator: grey (idle), brand blue (processing), green (success), or red (error). Errors are also printed in the Office task pane console (Edge DevTools).
 
 ### Behind the scenes

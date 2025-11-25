@@ -22,6 +22,17 @@ const CONCLUSION_HEADERS = [
   new RegExp(`^\\s*${NUMBERING_PREFIX}conclusions?\\s+and\\s+recommendations\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
 ];
 
+const AIM_OBJECTIVE_HEADERS = [
+  new RegExp(`^\\s*${NUMBERING_PREFIX}aims?\\s*(?:and|&)\\s*objectives?\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*${NUMBERING_PREFIX}aim\\s*&\\s*objectives\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*${NUMBERING_PREFIX}goal(?:s)?\\s*(?:and|&)\\s*objectives?\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+];
+
+const RESEARCH_QUESTION_HEADERS = [
+  new RegExp(`^\\s*${NUMBERING_PREFIX}research\\s+questions?(?:\\s+section)?\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*${NUMBERING_PREFIX}research\\s+question\\s+\\d+\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+];
+
 type ParagraphMeta = {
   index: number;
   text: string;
@@ -29,6 +40,12 @@ type ParagraphMeta = {
   style: string;
   styleBuiltIn: string;
   alignment: string;
+};
+
+type SectionRange = {
+  name: string;
+  headingIndex: number;
+  endIndex: number;
 };
 
 function buildParagraphMeta(paragraphs: Word.ParagraphCollection): ParagraphMeta[] {
@@ -102,36 +119,37 @@ function findReferenceStartIndex(metas: ParagraphMeta[]): number {
   return -1;
 }
 
-function findConclusionRange(
+function findSectionRange(
   metas: ParagraphMeta[],
-  referenceStartIndex: number
-): { conclusionHeadingIndex: number; conclusionEndIndex: number } {
-  let conclusionHeadingIndex = -1;
+  referenceStartIndex: number,
+  headerRegexes: RegExp[],
+  sectionName: string
+): SectionRange {
+  let headingIndex = -1;
 
   for (let i = referenceStartIndex === -1 ? metas.length - 1 : referenceStartIndex - 1; i >= 0; i--) {
     const txt = metas[i].text;
-    if (CONCLUSION_HEADERS.some((regex) => regex.test(txt))) {
-      conclusionHeadingIndex = i;
+    if (headerRegexes.some((regex) => regex.test(txt))) {
+      headingIndex = i;
       break;
     }
   }
 
-  let conclusionEndIndex = -1;
+  let endIndex = -1;
   let reason = "End of document (no next section found)";
 
-  if (conclusionHeadingIndex !== -1) {
-    for (let i = conclusionHeadingIndex + 1; i < metas.length; i++) {
+  if (headingIndex !== -1) {
+    for (let i = headingIndex + 1; i < metas.length; i++) {
       if (REFERENCE_HEADERS.some((regex) => regex.test(metas[i].text))) {
-        conclusionEndIndex = i;
+        endIndex = i;
         reason = `Found Reference Header at index ${i}: "${metas[i].text}"`;
         break;
       }
 
-      if (isHeadingOrTitle(metas[i]) && !CONCLUSION_HEADERS.some((regex) => regex.test(metas[i].text))) {
-        conclusionEndIndex = i;
+      if (isHeadingOrTitle(metas[i]) && !headerRegexes.some((regex) => regex.test(metas[i].text))) {
+        endIndex = i;
         reason = `Found next Heading at index ${i}: "${metas[i].text}"`;
 
-        // Log details about why it was detected as a heading
         const meta = metas[i];
         const s = meta.style;
         const sb = meta.styleBuiltIn;
@@ -151,7 +169,7 @@ function findConclusionRange(
         const capitalised = words.filter((w) => /^[A-Z]/.test(w)).length;
         const isTitleCase = words.length > 1 && capitalised / words.length > 0.6;
 
-        console.log(`Heading Detection Details for index ${i}:`, {
+        console.log(`${sectionName} Heading Detection Details for index ${i}:`, {
           text: meta.text,
           style: meta.style,
           styleBuiltIn: meta.styleBuiltIn,
@@ -170,19 +188,19 @@ function findConclusionRange(
       }
     }
 
-    if (conclusionEndIndex === -1 && referenceStartIndex !== -1) {
-      conclusionEndIndex = referenceStartIndex;
+    if (endIndex === -1 && referenceStartIndex !== -1) {
+      endIndex = referenceStartIndex;
       reason = `Reached Reference Start Index at ${referenceStartIndex}`;
     }
   }
 
-  console.log(`Conclusion Detection: Start Index: ${conclusionHeadingIndex}`);
-  if (conclusionHeadingIndex !== -1) {
-    console.log(`Conclusion Detection: End Index: ${conclusionEndIndex}`);
-    console.log(`Conclusion Detection: End Reason: ${reason}`);
+  console.log(`${sectionName} Detection: Start Index: ${headingIndex}`);
+  if (headingIndex !== -1) {
+    console.log(`${sectionName} Detection: End Index: ${endIndex}`);
+    console.log(`${sectionName} Detection: End Reason: ${reason}`);
   }
 
-  return { conclusionHeadingIndex, conclusionEndIndex };
+  return { name: sectionName, headingIndex, endIndex };
 }
 
 interface SentenceSlot {
@@ -319,8 +337,15 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
         return "No valid references found in the Reference List section";
       }
 
-      const { conclusionHeadingIndex, conclusionEndIndex } = findConclusionRange(metas, referenceStartIndex);
-      console.log("analyzeDocument => conclusion range", { conclusionHeadingIndex, conclusionEndIndex });
+      const excludedSections: SectionRange[] = [
+        findSectionRange(metas, referenceStartIndex, CONCLUSION_HEADERS, "Conclusion"),
+        findSectionRange(metas, referenceStartIndex, AIM_OBJECTIVE_HEADERS, "Aim and Objectives"),
+        findSectionRange(metas, referenceStartIndex, RESEARCH_QUESTION_HEADERS, "Research Questions"),
+      ];
+      console.log(
+        "analyzeDocument => section ranges",
+        excludedSections.map(({ name, headingIndex, endIndex }) => ({ name, headingIndex, endIndex }))
+      );
 
       // Filter out short paragraphs, TOC lines, and those ending with ":"
       const eligibleIndexes = metas
@@ -329,12 +354,14 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
             return false;
           }
 
-          if (
-            conclusionHeadingIndex !== -1 &&
-            conclusionEndIndex !== -1 &&
-            meta.index > conclusionHeadingIndex &&
-            meta.index < conclusionEndIndex
-          ) {
+          const insideExcludedSection = excludedSections.some((section) => {
+            if (section.headingIndex === -1 || section.endIndex === -1) {
+              return false;
+            }
+            return meta.index > section.headingIndex && meta.index < section.endIndex;
+          });
+
+          if (insideExcludedSection) {
             return false;
           }
 
@@ -676,6 +703,39 @@ export async function removeWeirdNumbers(): Promise<string> {
 }
 
 /**
+ * Removes bold formatting from body paragraphs while preserving headings or titles.
+ */
+export async function normalizeBodyBold(): Promise<string> {
+  try {
+    return await Word.run(async (context) => {
+      const paragraphs = context.document.body.paragraphs;
+      paragraphs.load("text,style,styleBuiltIn,alignment");
+      await context.sync();
+
+      const metas = buildParagraphMeta(paragraphs);
+      let updatedCount = 0;
+
+      for (const meta of metas) {
+        if (!meta.text) continue;
+        if (isHeadingOrTitle(meta)) continue;
+
+        const paragraph = paragraphs.items[meta.index];
+        paragraph.font.bold = false;
+        updatedCount++;
+      }
+
+      await context.sync();
+      const result = `Removed bold formatting from ${updatedCount} paragraph${updatedCount === 1 ? "" : "s"}.`;
+      console.log(result);
+      return result;
+    });
+  } catch (error) {
+    console.error("Error in normalizeBodyBold:", error);
+    throw new Error(`Error normalizing bold text: ${error.message}`);
+  }
+}
+
+/**
  * Paraphrase all body paragraphs in the document using the local API
  */
 interface ParaphraseParagraphMeta {
@@ -824,6 +884,7 @@ export async function paraphraseDocument(): Promise<string> {
 
         if (p) {
           p.insertText(newText, Word.InsertLocation.replace);
+          p.font.bold = false;
           updatedCount++;
           console.log(`Updated paragraph ${i + 1}/${metas.length}`);
         } else {
@@ -881,6 +942,7 @@ export async function paraphraseSelectedText(): Promise<string> {
 
       // Replace the selected text with the paraphrased text
       selection.insertText(paraphrasedText, Word.InsertLocation.replace);
+      selection.font.bold = false;
       await context.sync();
 
       return "Text paraphrased successfully";

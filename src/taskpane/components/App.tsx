@@ -4,6 +4,7 @@ import { Timer24Regular } from "@fluentui/react-icons";
 import * as React from "react";
 import {
   analyzeDocument,
+  normalizeBoldText,
   paraphraseSelectedText,
   removeLinks,
   removeReferences,
@@ -128,6 +129,7 @@ const App: React.FC = () => {
       await removeReferences();
       await removeLinks(false);
       await removeWeirdNumbers();
+      await normalizeBoldText();
       setStatus("success");
     } catch (error) {
       setStatus("error");
@@ -236,7 +238,7 @@ const App: React.FC = () => {
             This add-in is optimized for Word and PowerPoint. Some features may not be available in other applications.
           </Text>
         )}
-        v2.9
+        v2.10
         {getStatusDisplay()}
         {paraphraseTime !== null && (
           <div

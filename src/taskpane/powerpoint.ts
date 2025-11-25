@@ -13,6 +13,20 @@ const REFERENCE_HEADERS = [
   new RegExp(`^\\s*${NUMBERING_PREFIX}list\\s+of\\s+references\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
 ];
 
+function matchesReferenceHeader(rawText: string): boolean {
+  if (!rawText) return false;
+  const trimmed = rawText.trim();
+  if (REFERENCE_HEADERS.some((regex) => regex.test(trimmed))) {
+    return true;
+  }
+
+  const firstLine = trimmed.split(/\r?\n/)[0]?.trim();
+  if (firstLine && firstLine !== trimmed) {
+    return REFERENCE_HEADERS.some((regex) => regex.test(firstLine));
+  }
+  return false;
+}
+
 const CONCLUSION_HEADERS = [
   new RegExp(`^\\s*${NUMBERING_PREFIX}conclusions?(?:\\s+section)?\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
   new RegExp(`^\\s*${NUMBERING_PREFIX}concluding\\s+remarks\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
@@ -60,7 +74,7 @@ function isHeadingOrTitle(meta: ShapeMeta): boolean {
 
 function findReferenceStartIndex(metas: ShapeMeta[]): number {
   for (let i = metas.length - 1; i >= 0; i--) {
-    if (REFERENCE_HEADERS.some((regex) => regex.test(metas[i].text))) {
+    if (matchesReferenceHeader(metas[i].text)) {
       return i;
     }
   }
@@ -86,7 +100,7 @@ function findConclusionRange(
 
   if (conclusionHeadingIndex !== -1) {
     for (let i = conclusionHeadingIndex + 1; i < metas.length; i++) {
-      if (REFERENCE_HEADERS.some((regex) => regex.test(metas[i].text))) {
+      if (matchesReferenceHeader(metas[i].text)) {
         conclusionEndIndex = i;
         reason = `Found Reference Header at index ${i}: "${metas[i].text}"`;
         break;
@@ -143,6 +157,7 @@ function shuffleInPlace<T>(array: T[]): T[] {
 }
 
 const TEXT_CAPABLE_SHAPE_TYPES = new Set(["GeometricShape", "TextBox", "Placeholder", "SmartArt", "Group"]);
+const PARAPHRASE_DELIMITER = "qbpdelim123";
 
 type TextShapeHandle = {
   slide: PowerPoint.Slide;
@@ -192,7 +207,6 @@ async function tryLoadShapeText(handle: TextShapeHandle, context: PowerPoint.Req
   }
 
   try {
-    // @ts-ignore
     return handle.shape.textFrame.textRange.text as string;
   } catch (error) {
     console.warn(`tryLoadShapeText => unable to read text for ${location}`, error);
@@ -223,38 +237,20 @@ export async function insertText(text: string) {
 export async function analyzeDocument(insertEveryOther: boolean = false): Promise<string> {
   try {
     return await PowerPoint.run(async (context) => {
-      console.log("analyzeDocument => start", { insertEveryOther });
       const slides = context.presentation.slides;
 
       // Load basic properties first to identify shapes with text
       slides.load("items/id, items/shapes/items/id, items/shapes/items/type");
       await context.sync();
 
-      console.log("analyzeDocument => slides count", slides.items.length);
-
-      // Queue up text loading for shapes that can contain text
-      // Only load text for shape types that support text frames
-      const TEXT_SHAPE_TYPES = ["GeometricShape", "TextBox", "Group"];
-
-      let totalShapesCount = 0;
-      let shapesWithTextFrameCount = 0;
       for (let slide of slides.items) {
-        console.log(`analyzeDocument => slide shapes count: ${slide.shapes.items.length}`);
         for (let shape of slide.shapes.items) {
-          totalShapesCount++;
-          console.log(`analyzeDocument => shape id: ${shape.id}, type: ${shape.type}`);
-
           // Only try to load text for shapes that can have text
-          if (TEXT_SHAPE_TYPES.includes(shape.type)) {
+          if (TEXT_CAPABLE_SHAPE_TYPES.has(shape.type)) {
             shape.textFrame.textRange.load("text");
-            shapesWithTextFrameCount++;
-            console.log(`analyzeDocument => queued text load for shape ${shape.id}`);
-          } else {
-            console.log(`analyzeDocument => skipping shape ${shape.id} (type: ${shape.type} cannot have text)`);
           }
         }
       }
-      console.log(`analyzeDocument => total shapes: ${totalShapesCount}, queued for text: ${shapesWithTextFrameCount}`);
       await context.sync();
 
       const metas: ShapeMeta[] = [];
@@ -268,16 +264,12 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
 
           let text = "";
           try {
-            // @ts-ignore
             text = shape.textFrame.textRange.text;
-            console.log(`analyzeDocument => shape text length: ${text.length}, preview: "${text.substring(0, 50)}"`);
           } catch (e) {
-            console.log(`analyzeDocument => skipping shape without text at slide ${i}, shape ${j}: ${e}`);
             continue;
           }
 
           text = text.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
-          console.log(`analyzeDocument => after trim, text length: ${text.length}`);
           if (text) {
             const words = text.split(/\s+/).filter(Boolean);
             const isTitle = j === 0 && words.length < 10;
@@ -293,39 +285,50 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
               isTitle,
               index: globalIndex++,
             });
-            console.log(
-              `analyzeDocument => added meta: wordCount=${words.length}, isTitle=${isTitle}, index=${globalIndex - 1}`
-            );
-          } else {
-            console.log(`analyzeDocument => skipping empty text at slide ${i}, shape ${j}`);
           }
         }
       }
 
-      console.log("analyzeDocument => shape count", metas.length);
       if (metas.length === 0) {
         return "No text content found in the presentation";
       }
 
       const referenceStartIndex = findReferenceStartIndex(metas);
-      console.log({ referenceStartIndex });
       if (referenceStartIndex === -1) {
         return "No Reference List section found";
       }
 
-      const referenceSection = metas
-        .slice(referenceStartIndex)
-        .map((m) => m.text)
-        .join("\n");
+      const headerMeta = metas[referenceStartIndex];
+      const previousSameSlideMetas = metas.filter(
+        (meta) => meta.slideId === headerMeta.slideId && meta.index < referenceStartIndex
+      );
+      const tailAfterHeader = metas.slice(referenceStartIndex + 1);
+      const referenceTailMetas = [headerMeta, ...previousSameSlideMetas, ...tailAfterHeader];
+      console.log(
+        "analyzeDocument => reference metas preview:",
+        referenceTailMetas.slice(0, 5).map((meta) => ({
+          slide: meta.slideIndex,
+          shape: meta.shapeIndex,
+          words: meta.wordCount,
+          preview: meta.text.substring(0, 120),
+        }))
+      );
 
+      const referenceSection = referenceTailMetas
+        .map((m) => m.text)
+        .join("\n")
+        .trim();
+
+      console.log("analyzeDocument => reference section detected:", referenceSection);
       let references: string[] = [];
       try {
+        console.log("analyzeDocument => sending payload to formatter:\n", referenceSection);
         const formattedRefs = await getFormattedReferences(referenceSection);
+        console.log("analyzeDocument => AI response:\n", formattedRefs);
         references = formattedRefs
           .split(/\n\s*\n/)
           .map((ref) => ref.trim())
           .filter(Boolean);
-        console.log("analyzeDocument => formatted reference count", references.length);
       } catch (error) {
         console.error("Error in getFormattedReferences:", error);
         throw error;
@@ -420,7 +423,6 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
       });
 
       shuffleInPlace(finalSlots);
-      console.log("analyzeDocument => sentence slots count", finalSlots.length);
 
       const usedReferences = new Set<number>();
 
@@ -444,7 +446,6 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
       }
 
       // Apply changes sequentially, per shape, to identify problematic slides precisely
-      console.log("analyzeDocument => applying changes to shapes");
       const slidesById = new Map(slides.items.map((slide) => [slide.id, slide]));
       const entries = Array.from(changesByMeta.entries());
 
@@ -469,7 +470,6 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
         const newSentences = sentences.map((s, i) => (changes.has(i) ? changes.get(i) : s));
         const reconstructedText = newSentences.join("");
 
-        console.log(`analyzeDocument => loading shape ${meta.shapeId} (slide ${meta.slideId}) before update`);
         try {
           shape.textFrame.textRange.load("text");
           await context.sync();
@@ -478,13 +478,9 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
           continue;
         }
 
-        console.log(
-          `analyzeDocument => updating slide ${meta.slideIndex} (${meta.slideId}), shape ${meta.shapeIndex} (${meta.shapeId}), type=${meta.shapeType}`
-        );
         try {
-          // @ts-ignore
           shape.textFrame.textRange.text = reconstructedText;
-          // @ts-ignore
+
           shape.textFrame.textRange.font.bold = false;
           await context.sync();
         } catch (error) {
@@ -492,7 +488,6 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
         }
       }
 
-      console.log("analyzeDocument => changes applied successfully");
       return "References added successfully";
     });
   } catch (error) {
@@ -591,7 +586,7 @@ export async function removeLinks(deleteAll: boolean = false): Promise<string> {
           continue;
         }
 
-        if (!deleteAll && REFERENCE_HEADERS.some((r) => r.test(text))) {
+        if (!deleteAll && matchesReferenceHeader(text)) {
           continue;
         }
 
@@ -662,6 +657,241 @@ export async function removeWeirdNumbers(): Promise<string> {
   } catch (error) {
     console.error("Error in removeWeirdNumbers:", error);
     throw new Error(`Error removing weird numbers: ${error.message}`);
+  }
+}
+
+export async function normalizeBodyBold(): Promise<string> {
+  try {
+    return await PowerPoint.run(async (context) => {
+      console.log("normalizeBodyBold => start");
+      const textShapes = await loadTextCapableShapes(context);
+      if (textShapes.length === 0) {
+        return "No text content available to normalize";
+      }
+
+      let updatedCount = 0;
+      let globalIndex = 0;
+
+      for (const handle of textShapes) {
+        const location = describeShape(handle);
+        console.log(`normalizeBodyBold => inspecting ${location}`);
+        const text = await tryLoadShapeText(handle, context);
+        if (!text) {
+          console.warn(`normalizeBodyBold => skipping ${location} (unable to load text)`);
+          continue;
+        }
+
+        const sanitized = text.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+        if (!sanitized) {
+          globalIndex++;
+          continue;
+        }
+
+        const words = sanitized.split(/\s+/).filter(Boolean);
+        const meta: ShapeMeta = {
+          slideId: handle.slide.id,
+          slideIndex: handle.slideIndex,
+          shapeId: handle.shape.id,
+          shapeIndex: handle.shapeIndex,
+          shapeType: handle.shape.type,
+          text: sanitized,
+          wordCount: words.length,
+          isTitle: handle.shapeIndex === 0 && words.length < 10,
+          index: globalIndex++,
+        };
+
+        if (isHeadingOrTitle(meta)) {
+          continue;
+        }
+
+        handle.shape.textFrame.textRange.font.bold = false;
+        updatedCount++;
+      }
+
+      await context.sync();
+      const result = `Removed bold formatting from ${updatedCount} text shape${updatedCount === 1 ? "" : "s"}.`;
+      console.log(`normalizeBodyBold => completed (${result})`);
+      return result;
+    });
+  } catch (error) {
+    console.error("Error in normalizeBodyBold:", error);
+    throw new Error(`Error normalizing bold text: ${error.message}`);
+  }
+}
+
+export async function paraphraseDocument(): Promise<string> {
+  try {
+    return await PowerPoint.run(async (context) => {
+      console.log("paraphraseDocument => start");
+
+      const textShapes = await loadTextCapableShapes(context);
+      console.log(`paraphraseDocument => text-capable shapes loaded: ${textShapes.length}`);
+
+      if (!textShapes.length) {
+        return "No text content available to paraphrase";
+      }
+
+      const handleByShapeId = new Map<string, TextShapeHandle>();
+      const metas: ShapeMeta[] = [];
+      let globalIndex = 0;
+
+      for (const handle of textShapes) {
+        handleByShapeId.set(handle.shape.id, handle);
+        const rawText = await tryLoadShapeText(handle, context);
+        if (!rawText) {
+          continue;
+        }
+
+        const sanitized = rawText.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+        if (!sanitized) {
+          continue;
+        }
+
+        const words = sanitized.split(/\s+/).filter(Boolean);
+        const meta: ShapeMeta = {
+          slideId: handle.slide.id,
+          slideIndex: handle.slideIndex,
+          shapeId: handle.shape.id,
+          shapeIndex: handle.shapeIndex,
+          shapeType: handle.shape.type,
+          text: sanitized,
+          wordCount: words.length,
+          isTitle: handle.shapeIndex === 0 && words.length < 10,
+          index: globalIndex++,
+        };
+
+        metas.push(meta);
+      }
+
+      console.log(`paraphraseDocument => collected metas: ${metas.length}`);
+      if (metas.length === 0) {
+        return "No text content found in the presentation";
+      }
+
+      const referenceStartIndex = findReferenceStartIndex(metas);
+      const { conclusionHeadingIndex, conclusionEndIndex } = findConclusionRange(metas, referenceStartIndex);
+      console.log(
+        "paraphraseDocument => sections",
+        JSON.stringify({ referenceStartIndex, conclusionHeadingIndex, conclusionEndIndex })
+      );
+
+      const eligibleMetas = metas.filter((meta) => {
+        if (referenceStartIndex !== -1 && meta.index >= referenceStartIndex) return false;
+        if (
+          conclusionHeadingIndex !== -1 &&
+          conclusionEndIndex !== -1 &&
+          meta.index > conclusionHeadingIndex &&
+          meta.index < conclusionEndIndex
+        )
+          return false;
+        if (matchesReferenceHeader(meta.text)) return false;
+        if (isHeadingOrTitle(meta)) return false;
+        if (meta.wordCount < 11) return false;
+        if (meta.text.trim().endsWith(":")) return false;
+        return true;
+      });
+
+      console.log(
+        "paraphraseDocument => eligible summary",
+        eligibleMetas
+          .map((meta) => ({
+            slide: meta.slideIndex,
+            shape: meta.shapeIndex,
+            words: meta.wordCount,
+            preview: meta.text.substring(0, 80),
+          }))
+          .slice(0, 5)
+      );
+
+      if (eligibleMetas.length === 0) {
+        return "No eligible text shapes found to paraphrase.";
+      }
+
+      const chunks: string[] = [];
+      for (const meta of eligibleMetas) {
+        chunks.push(PARAPHRASE_DELIMITER);
+        chunks.push(meta.text);
+      }
+      const payloadText = chunks.join("\n\n");
+
+      console.log(
+        `paraphraseDocument => sending ${payloadText.length} chars to paraphrase API (chunks=${eligibleMetas.length})`
+      );
+
+      let response;
+      try {
+        response = await fetch("https://analizeai.com/paraphrase", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ text: payloadText, freeze: [PARAPHRASE_DELIMITER] }),
+        });
+      } catch (networkError) {
+        console.error("paraphraseDocument => network error", networkError);
+        throw networkError;
+      }
+
+      if (!response.ok) {
+        throw new Error(`API request failed with status ${response.status}`);
+      }
+
+      const data = await response.json();
+      const paraphrasedWholeText = data.secondMode;
+
+      if (!paraphrasedWholeText) {
+        throw new Error("Invalid response from paraphrase API");
+      }
+
+      const parts = paraphrasedWholeText
+        .split(new RegExp(`\\b${PARAPHRASE_DELIMITER}\\b`, "i"))
+        .map((part: string) => part.trim())
+        .filter((part: string) => part.length > 0);
+
+      if (parts.length !== eligibleMetas.length) {
+        console.error(
+          `paraphraseDocument => mismatch: sent ${eligibleMetas.length}, received ${parts.length} paraphrased parts`
+        );
+        throw new Error(
+          `Paraphrase count mismatch. Sent ${eligibleMetas.length}, received ${parts.length}. Aborting to prevent data loss.`
+        );
+      }
+
+      let updatedCount = 0;
+
+      for (let i = 0; i < eligibleMetas.length; i++) {
+        const meta = eligibleMetas[i];
+        const newText = parts[i];
+        const handle = handleByShapeId.get(meta.shapeId);
+        if (!handle) {
+          console.warn(`paraphraseDocument => missing handle for shape ${meta.shapeId}`);
+          continue;
+        }
+
+        const shape = handle.shape;
+
+        try {
+          shape.textFrame.textRange.text = newText;
+          shape.textFrame.textRange.font.bold = false;
+          await context.sync();
+          updatedCount++;
+          console.log(
+            `paraphraseDocument => updated slide ${meta.slideIndex} shape ${meta.shapeIndex} (${meta.wordCount} words)`,
+            {
+              oldPreview: meta.text.substring(0, 80),
+              newPreview: newText.substring(0, 80),
+            }
+          );
+        } catch (error) {
+          console.error(`paraphraseDocument => failed updating shape ${meta.shapeId}`, error);
+        }
+      }
+
+      return `Successfully paraphrased ${updatedCount} text shape${updatedCount === 1 ? "" : "s"}.`;
+    });
+  } catch (error) {
+    console.error("Error in paraphraseDocument:", error);
+    throw new Error(`Error paraphrasing document: ${error.message}`);
   }
 }
 
