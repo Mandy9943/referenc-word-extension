@@ -5,6 +5,7 @@ import * as React from "react";
 import {
   analyzeDocument,
   normalizeBoldText,
+  paraphraseSelectedTextStandard as paraphraseDocumentStandard,
   paraphraseSelectedText,
   removeLinks,
   removeReferences,
@@ -160,6 +161,30 @@ const App: React.FC = () => {
     }
   };
 
+  const handleParaphraseTextStandard = async () => {
+    setStatus("loading");
+    setParaphraseTime(0);
+    const startTime = Date.now();
+
+    if (timerRef.current) clearInterval(timerRef.current);
+
+    timerRef.current = setInterval(() => {
+      setParaphraseTime((Date.now() - startTime) / 1000);
+    }, 100);
+
+    try {
+      await paraphraseDocumentStandard();
+      setStatus("success");
+    } catch (error) {
+      setStatus("error");
+    } finally {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+    }
+  };
+
   const getStatusDisplay = () => {
     const baseClassName = `${styles.status} `;
     switch (status) {
@@ -212,7 +237,16 @@ const App: React.FC = () => {
               className={styles.button}
               style={{ backgroundColor: "#7d7fd6ff" }}
             >
-              Paraphrase
+              SIMPLE + SHORT
+            </Button>
+            <Button
+              appearance="secondary"
+              onClick={handleParaphraseTextStandard}
+              disabled={status === "loading"}
+              className={styles.button}
+              style={{ backgroundColor: "#5a9bd6ff" }}
+            >
+              STANDARD
             </Button>
 
             <div

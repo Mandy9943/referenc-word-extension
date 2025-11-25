@@ -903,7 +903,7 @@ export async function paraphraseDocument(): Promise<string> {
 }
 
 /**
- * Paraphrase selected text using the local API
+ * Paraphrase selected text using the local API (Simple + Short mode)
  */
 export async function paraphraseSelectedText(): Promise<string> {
   try {
@@ -921,7 +921,7 @@ export async function paraphraseSelectedText(): Promise<string> {
       }
 
       // Call the paraphrase API
-      const response = await fetch("http://localhost:3090/paraphrase", {
+      const response = await fetch("https://analizeai.com/paraphrase", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -950,5 +950,216 @@ export async function paraphraseSelectedText(): Promise<string> {
   } catch (error) {
     console.error("Error in paraphraseSelectedText:", error);
     throw new Error(`Error paraphrasing text: ${error.message}`);
+  }
+}
+
+/**
+ * Paraphrase selected text using the Standard mode API
+ */
+export async function paraphraseSelectedTextStandard(): Promise<string> {
+  try {
+    return await Word.run(async (context) => {
+      // Get the selected range
+      const selection = context.document.getSelection();
+      selection.load("text");
+      await context.sync();
+
+      // Get the selected text content
+      const selectedText = selection.text.trim();
+
+      if (!selectedText) {
+        throw new Error("No text selected");
+      }
+
+      // Call the paraphrase-standard API
+      const response = await fetch("https://analizeai.com/paraphrase-standard", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ text: selectedText }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`API request failed with status ${response.status}`);
+      }
+
+      const data = await response.json();
+      const paraphrasedText = data.output;
+
+      if (!paraphrasedText) {
+        throw new Error("Invalid response from paraphrase API");
+      }
+
+      // Replace the selected text with the paraphrased text
+      selection.insertText(paraphrasedText, Word.InsertLocation.replace);
+      selection.font.bold = false;
+      await context.sync();
+
+      return "Text paraphrased successfully";
+    });
+  } catch (error) {
+    console.error("Error in paraphraseSelectedTextStandard:", error);
+    throw new Error(`Error paraphrasing text: ${error.message}`);
+  }
+}
+
+/**
+ * Paraphrase all body paragraphs in the document using the Standard mode API
+ */
+export async function paraphraseDocumentStandard(): Promise<string> {
+  try {
+    return await Word.run(async (context) => {
+      console.log("Starting document paraphrase (Standard mode)...");
+
+      const paragraphs = context.document.body.paragraphs;
+      paragraphs.load("items/text, items/outlineLevel, items/uniqueLocalId");
+      await context.sync();
+
+      // First pass: identify reference section
+      let referenceStartIndex = -1;
+      for (let i = paragraphs.items.length - 1; i >= 0; i--) {
+        const text = paragraphs.items[i].text ? paragraphs.items[i].text.trim() : "";
+        if (REFERENCE_HEADERS.some((regex) => regex.test(text))) {
+          referenceStartIndex = i;
+          console.log(`Found reference section at index ${i}: "${text}"`);
+          break;
+        }
+      }
+
+      const metas: ParaphraseParagraphMeta[] = [];
+
+      for (let i = 0; i < paragraphs.items.length; i++) {
+        const p = paragraphs.items[i];
+        const text = p.text ? p.text.trim() : "";
+        if (!text) continue;
+
+        // Skip paragraphs in or after reference section
+        if (referenceStartIndex !== -1 && i >= referenceStartIndex) {
+          console.log(`Skipping paragraph in reference section (index: ${i}): "${text.substring(0, 50)}..."`);
+          continue;
+        }
+
+        // Skip very short paragraphs (likely titles/headings)
+        const wordCount = text.split(/\s+/).filter(Boolean).length;
+        if (wordCount < 15) {
+          console.log(`Skipping short paragraph (${wordCount} words): "${text}"`);
+          continue;
+        }
+
+        // Skip headings/titles - only include body text paragraphs
+        // In Word API, outlineLevel 10 = body text, other numbers (1-9) = heading levels
+        const outlineLevel = typeof p.outlineLevel === "number" ? p.outlineLevel : Number(p.outlineLevel);
+        const isBody = outlineLevel === 10;
+
+        if (!isBody) {
+          console.log(`Skipping non-body paragraph (outlineLevel: ${p.outlineLevel}): "${text.substring(0, 50)}..."`);
+          continue;
+        }
+
+        metas.push({
+          id: p.uniqueLocalId,
+          text: p.text,
+        });
+      }
+
+      if (metas.length === 0) {
+        return "No body paragraphs found to paraphrase.";
+      }
+
+      console.log(`Found ${metas.length} body paragraphs to paraphrase.`);
+
+      // Build payload with delimiter between paragraphs (same as paraphraseDocument)
+      const chunks: string[] = [];
+      for (const meta of metas) {
+        chunks.push(PARAPHRASE_DELIMITER);
+        chunks.push(meta.text);
+      }
+      const payloadText = chunks.join("\n\n");
+
+      console.log(
+        `Sending ${payloadText.length} characters to paraphrase-standard API with frozen delimiter: ${PARAPHRASE_DELIMITER}`
+      );
+      console.log("=== COMPLETE PAYLOAD BEING SENT ===");
+      console.log(payloadText);
+      console.log("=== END OF PAYLOAD ===");
+
+      // Send to Standard API with frozen delimiter (same as paraphraseDocument)
+      const response = await fetch("https://analizeai.com/paraphrase-standard", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ text: payloadText, freeze: [PARAPHRASE_DELIMITER] }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`API request failed with status ${response.status}`);
+      }
+
+      const data = await response.json();
+      const paraphrasedWholeText = data.output;
+
+      if (!paraphrasedWholeText) {
+        throw new Error("Invalid response from paraphrase API");
+      }
+
+      console.log("=== COMPLETE RESPONSE RECEIVED ===");
+      console.log(paraphrasedWholeText);
+      console.log("=== END OF RESPONSE ===");
+
+      // Parse response by splitting on the frozen delimiter (same as paraphraseDocument)
+      const parts = paraphrasedWholeText
+        .split(new RegExp(`\\b${PARAPHRASE_DELIMITER}\\b`, "i"))
+        .map((x: string) => x.trim())
+        .filter((x: string) => x.length > 0);
+
+      console.log(`Received ${parts.length} paraphrased parts from API.`);
+      console.log("=== PARSED PARTS ===");
+      parts.forEach((part, index) => {
+        console.log(`Part ${index + 1}:`, part);
+      });
+      console.log("=== END OF PARSED PARTS ===");
+
+      if (parts.length !== metas.length) {
+        console.error(`Mismatch: sent ${metas.length} paragraphs, received ${parts.length} parts`);
+        throw new Error(
+          `Paraphrase count mismatch. Sent ${metas.length}, received ${parts.length}. Aborting to prevent data loss.`
+        );
+      }
+
+      // Re-fetch paragraphs to ensure validity and apply changes
+      const paragraphsToUpdate = context.document.body.paragraphs;
+      paragraphsToUpdate.load("items/uniqueLocalId");
+      await context.sync();
+
+      const paragraphById = new Map<string, Word.Paragraph>();
+      paragraphsToUpdate.items.forEach((p) => {
+        paragraphById.set(p.uniqueLocalId, p);
+      });
+
+      let updatedCount = 0;
+      for (let i = 0; i < metas.length; i++) {
+        const meta = metas[i];
+        const newText = parts[i];
+        const p = paragraphById.get(meta.id);
+
+        if (p) {
+          p.insertText(newText, Word.InsertLocation.replace);
+          p.font.bold = false;
+          updatedCount++;
+          console.log(`Updated paragraph ${i + 1}/${metas.length}`);
+        } else {
+          console.warn(`Could not find paragraph with ID ${meta.id}`);
+        }
+      }
+
+      await context.sync();
+      console.log(`Paraphrase complete. Updated ${updatedCount}/${metas.length} paragraphs.`);
+      return `Successfully paraphrased ${updatedCount} body paragraphs.`;
+    });
+  } catch (error) {
+    console.error("Error in paraphraseDocumentStandard:", error);
+    throw new Error(`Error paraphrasing document: ${error.message}`);
   }
 }

@@ -16,6 +16,7 @@ import {
   insertText as insertTextInWord,
   normalizeBodyBold as normalizeBodyBoldInWord,
   paraphraseDocument as paraphraseDocumentInWord,
+  paraphraseDocumentStandard as paraphraseDocumentStandardInWord,
   removeLinks as removeLinksInWord,
   removeReferences as removeReferencesInWord,
   removeWeirdNumbers as removeWeirdNumbersInWord,
@@ -108,6 +109,16 @@ export async function paraphraseSelectedText() {
       return await paraphraseDocumentInPowerPoint();
     default:
       throw new Error("This function is only available in Word and PowerPoint");
+  }
+}
+
+export async function paraphraseSelectedTextStandard() {
+  await Office.onReady();
+  switch (Office.context.host) {
+    case Office.HostType.Word:
+      return await paraphraseDocumentStandardInWord();
+    default:
+      throw new Error("This function is only available in Word");
   }
 }
 
