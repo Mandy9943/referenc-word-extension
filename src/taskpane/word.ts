@@ -748,7 +748,7 @@ const PARAPHRASE_DELIMITER = "qbpdelim123";
 export async function paraphraseDocument(): Promise<string> {
   try {
     return await Word.run(async (context) => {
-      console.log("Starting document paraphrase...");
+      console.log("Starting document paraphrase (Simple + Short mode with parallel processing)...");
 
       const paragraphs = context.document.body.paragraphs;
       paragraphs.load("items/text, items/outlineLevel, items/uniqueLocalId");
@@ -807,64 +807,99 @@ export async function paraphraseDocument(): Promise<string> {
 
       console.log(`Found ${metas.length} body paragraphs to paraphrase.`);
 
-      // Build payload with delimiter between paragraphs
-      const chunks: string[] = [];
-      for (const meta of metas) {
-        chunks.push(PARAPHRASE_DELIMITER);
-        chunks.push(meta.text);
-      }
-      const payloadText = chunks.join("\n\n");
+      // Split metas into two halves for parallel processing
+      const midpoint = Math.ceil(metas.length / 2);
+      const firstHalf = metas.slice(0, midpoint);
+      const secondHalf = metas.slice(midpoint);
 
       console.log(
-        `Sending ${payloadText.length} characters to paraphrase API with frozen delimiter: ${PARAPHRASE_DELIMITER}`
+        `Splitting work: ${firstHalf.length} paragraphs to analizeai.com, ${secondHalf.length} to v2.analizeai.com`
       );
-      console.log("=== COMPLETE PAYLOAD BEING SENT ===");
-      console.log(payloadText);
-      console.log("=== END OF PAYLOAD ===");
 
-      // Send to QuillBot API with frozen delimiter
-      const response = await fetch("https://analizeai.com/paraphrase", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ text: payloadText, freeze: [PARAPHRASE_DELIMITER] }),
-      });
+      // Build payloads for both halves
+      const buildPayload = (metaArray: ParaphraseParagraphMeta[]) => {
+        const chunks: string[] = [];
+        for (const meta of metaArray) {
+          chunks.push(PARAPHRASE_DELIMITER);
+          chunks.push(meta.text);
+        }
+        return chunks.join("\n\n");
+      };
 
-      if (!response.ok) {
-        throw new Error(`API request failed with status ${response.status}`);
+      const payloadFirst = buildPayload(firstHalf);
+      const payloadSecond = buildPayload(secondHalf);
+
+      console.log(`First half payload: ${payloadFirst.length} characters`);
+      console.log(`Second half payload: ${payloadSecond.length} characters`);
+
+      // Send both requests in parallel
+      console.log("Sending parallel requests to both services...");
+      const [responseFirst, responseSecond] = await Promise.all([
+        fetch("https://analizeai.com/paraphrase", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ text: payloadFirst, freeze: [PARAPHRASE_DELIMITER] }),
+        }),
+        fetch("https://v2.analizeai.com/paraphrase", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ text: payloadSecond, freeze: [PARAPHRASE_DELIMITER] }),
+        }),
+      ]);
+
+      if (!responseFirst.ok) {
+        throw new Error(`API request to analizeai.com failed with status ${responseFirst.status}`);
+      }
+      if (!responseSecond.ok) {
+        throw new Error(`API request to v2.analizeai.com failed with status ${responseSecond.status}`);
       }
 
-      const data = await response.json();
-      const paraphrasedWholeText = data.secondMode;
+      console.log("Both responses received, parsing...");
 
-      if (!paraphrasedWholeText) {
+      const [dataFirst, dataSecond] = await Promise.all([responseFirst.json(), responseSecond.json()]);
+
+      const paraphrasedFirstHalf = dataFirst.secondMode;
+      const paraphrasedSecondHalf = dataSecond.secondMode;
+
+      if (!paraphrasedFirstHalf || !paraphrasedSecondHalf) {
         throw new Error("Invalid response from paraphrase API");
       }
 
-      console.log("=== COMPLETE RESPONSE RECEIVED ===");
-      console.log(paraphrasedWholeText);
-      console.log("=== END OF RESPONSE ===");
+      // Parse both responses
+      const parseResponse = (text: string) => {
+        return text
+          .split(new RegExp(`\\b${PARAPHRASE_DELIMITER}\\b`, "i"))
+          .map((x: string) => x.trim())
+          .filter((x: string) => x.length > 0);
+      };
 
-      // Parse response by splitting on the frozen delimiter
-      const parts = paraphrasedWholeText
-        .split(new RegExp(`\\b${PARAPHRASE_DELIMITER}\\b`, "i"))
-        .map((x: string) => x.trim())
-        .filter((x: string) => x.length > 0);
+      const partsFirst = parseResponse(paraphrasedFirstHalf);
+      const partsSecond = parseResponse(paraphrasedSecondHalf);
 
-      console.log(`Received ${parts.length} paraphrased parts from API.`);
-      console.log("=== PARSED PARTS ===");
-      parts.forEach((part, index) => {
-        console.log(`Part ${index + 1}:`, part);
-      });
-      console.log("=== END OF PARSED PARTS ===");
+      console.log(`Received ${partsFirst.length} parts from first service`);
+      console.log(`Received ${partsSecond.length} parts from second service`);
 
-      if (parts.length !== metas.length) {
-        console.error(`Mismatch: sent ${metas.length} paragraphs, received ${parts.length} parts`);
+      // Validate counts
+      if (partsFirst.length !== firstHalf.length) {
+        console.error(`First half mismatch: sent ${firstHalf.length}, received ${partsFirst.length}`);
         throw new Error(
-          `Paraphrase count mismatch. Sent ${metas.length}, received ${parts.length}. Aborting to prevent data loss.`
+          `First half paraphrase count mismatch. Sent ${firstHalf.length}, received ${partsFirst.length}. Aborting to prevent data loss.`
         );
       }
+      if (partsSecond.length !== secondHalf.length) {
+        console.error(`Second half mismatch: sent ${secondHalf.length}, received ${partsSecond.length}`);
+        throw new Error(
+          `Second half paraphrase count mismatch. Sent ${secondHalf.length}, received ${partsSecond.length}. Aborting to prevent data loss.`
+        );
+      }
+
+      // Combine results in order
+      const allParts = [...partsFirst, ...partsSecond];
+      console.log(`Combined total: ${allParts.length} paraphrased paragraphs`);
 
       // Re-fetch paragraphs to ensure validity and apply changes
       const paragraphsToUpdate = context.document.body.paragraphs;
@@ -879,7 +914,7 @@ export async function paraphraseDocument(): Promise<string> {
       let updatedCount = 0;
       for (let i = 0; i < metas.length; i++) {
         const meta = metas[i];
-        const newText = parts[i];
+        const newText = allParts[i];
         const p = paragraphById.get(meta.id);
 
         if (p) {
@@ -893,8 +928,8 @@ export async function paraphraseDocument(): Promise<string> {
       }
 
       await context.sync();
-      console.log(`Paraphrase complete. Updated ${updatedCount}/${metas.length} paragraphs.`);
-      return `Successfully paraphrased ${updatedCount} body paragraphs.`;
+      console.log(`Paraphrase complete. Updated ${updatedCount}/${metas.length} paragraphs using parallel processing.`);
+      return `Successfully paraphrased ${updatedCount} body paragraphs (parallel mode).`;
     });
   } catch (error) {
     console.error("Error in paraphraseDocument:", error);
@@ -1006,11 +1041,12 @@ export async function paraphraseSelectedTextStandard(): Promise<string> {
 
 /**
  * Paraphrase all body paragraphs in the document using the Standard mode API
+ * Uses parallel processing across two service instances for faster performance
  */
 export async function paraphraseDocumentStandard(): Promise<string> {
   try {
     return await Word.run(async (context) => {
-      console.log("Starting document paraphrase (Standard mode)...");
+      console.log("Starting document paraphrase (Standard mode with parallel processing)...");
 
       const paragraphs = context.document.body.paragraphs;
       paragraphs.load("items/text, items/outlineLevel, items/uniqueLocalId");
@@ -1069,64 +1105,99 @@ export async function paraphraseDocumentStandard(): Promise<string> {
 
       console.log(`Found ${metas.length} body paragraphs to paraphrase.`);
 
-      // Build payload with delimiter between paragraphs (same as paraphraseDocument)
-      const chunks: string[] = [];
-      for (const meta of metas) {
-        chunks.push(PARAPHRASE_DELIMITER);
-        chunks.push(meta.text);
-      }
-      const payloadText = chunks.join("\n\n");
+      // Split metas into two halves for parallel processing
+      const midpoint = Math.ceil(metas.length / 2);
+      const firstHalf = metas.slice(0, midpoint);
+      const secondHalf = metas.slice(midpoint);
 
       console.log(
-        `Sending ${payloadText.length} characters to paraphrase-standard API with frozen delimiter: ${PARAPHRASE_DELIMITER}`
+        `Splitting work: ${firstHalf.length} paragraphs to analizeai.com, ${secondHalf.length} to v2.analizeai.com`
       );
-      console.log("=== COMPLETE PAYLOAD BEING SENT ===");
-      console.log(payloadText);
-      console.log("=== END OF PAYLOAD ===");
 
-      // Send to Standard API with frozen delimiter (same as paraphraseDocument)
-      const response = await fetch("https://analizeai.com/paraphrase-standard", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ text: payloadText, freeze: [PARAPHRASE_DELIMITER] }),
-      });
+      // Build payloads for both halves
+      const buildPayload = (metaArray: ParaphraseParagraphMeta[]) => {
+        const chunks: string[] = [];
+        for (const meta of metaArray) {
+          chunks.push(PARAPHRASE_DELIMITER);
+          chunks.push(meta.text);
+        }
+        return chunks.join("\n\n");
+      };
 
-      if (!response.ok) {
-        throw new Error(`API request failed with status ${response.status}`);
+      const payloadFirst = buildPayload(firstHalf);
+      const payloadSecond = buildPayload(secondHalf);
+
+      console.log(`First half payload: ${payloadFirst.length} characters`);
+      console.log(`Second half payload: ${payloadSecond.length} characters`);
+
+      // Send both requests in parallel
+      console.log("Sending parallel requests to both services...");
+      const [responseFirst, responseSecond] = await Promise.all([
+        fetch("https://analizeai.com/paraphrase-standard", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ text: payloadFirst, freeze: [PARAPHRASE_DELIMITER] }),
+        }),
+        fetch("https://v2.analizeai.com/paraphrase-standard", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ text: payloadSecond, freeze: [PARAPHRASE_DELIMITER] }),
+        }),
+      ]);
+
+      if (!responseFirst.ok) {
+        throw new Error(`API request to analizeai.com failed with status ${responseFirst.status}`);
+      }
+      if (!responseSecond.ok) {
+        throw new Error(`API request to v2.analizeai.com failed with status ${responseSecond.status}`);
       }
 
-      const data = await response.json();
-      const paraphrasedWholeText = data.output;
+      console.log("Both responses received, parsing...");
 
-      if (!paraphrasedWholeText) {
+      const [dataFirst, dataSecond] = await Promise.all([responseFirst.json(), responseSecond.json()]);
+
+      const paraphrasedFirstHalf = dataFirst.output;
+      const paraphrasedSecondHalf = dataSecond.output;
+
+      if (!paraphrasedFirstHalf || !paraphrasedSecondHalf) {
         throw new Error("Invalid response from paraphrase API");
       }
 
-      console.log("=== COMPLETE RESPONSE RECEIVED ===");
-      console.log(paraphrasedWholeText);
-      console.log("=== END OF RESPONSE ===");
+      // Parse both responses
+      const parseResponse = (text: string) => {
+        return text
+          .split(new RegExp(`\\b${PARAPHRASE_DELIMITER}\\b`, "i"))
+          .map((x: string) => x.trim())
+          .filter((x: string) => x.length > 0);
+      };
 
-      // Parse response by splitting on the frozen delimiter (same as paraphraseDocument)
-      const parts = paraphrasedWholeText
-        .split(new RegExp(`\\b${PARAPHRASE_DELIMITER}\\b`, "i"))
-        .map((x: string) => x.trim())
-        .filter((x: string) => x.length > 0);
+      const partsFirst = parseResponse(paraphrasedFirstHalf);
+      const partsSecond = parseResponse(paraphrasedSecondHalf);
 
-      console.log(`Received ${parts.length} paraphrased parts from API.`);
-      console.log("=== PARSED PARTS ===");
-      parts.forEach((part, index) => {
-        console.log(`Part ${index + 1}:`, part);
-      });
-      console.log("=== END OF PARSED PARTS ===");
+      console.log(`Received ${partsFirst.length} parts from first service`);
+      console.log(`Received ${partsSecond.length} parts from second service`);
 
-      if (parts.length !== metas.length) {
-        console.error(`Mismatch: sent ${metas.length} paragraphs, received ${parts.length} parts`);
+      // Validate counts
+      if (partsFirst.length !== firstHalf.length) {
+        console.error(`First half mismatch: sent ${firstHalf.length}, received ${partsFirst.length}`);
         throw new Error(
-          `Paraphrase count mismatch. Sent ${metas.length}, received ${parts.length}. Aborting to prevent data loss.`
+          `First half paraphrase count mismatch. Sent ${firstHalf.length}, received ${partsFirst.length}. Aborting to prevent data loss.`
         );
       }
+      if (partsSecond.length !== secondHalf.length) {
+        console.error(`Second half mismatch: sent ${secondHalf.length}, received ${partsSecond.length}`);
+        throw new Error(
+          `Second half paraphrase count mismatch. Sent ${secondHalf.length}, received ${partsSecond.length}. Aborting to prevent data loss.`
+        );
+      }
+
+      // Combine results in order
+      const allParts = [...partsFirst, ...partsSecond];
+      console.log(`Combined total: ${allParts.length} paraphrased paragraphs`);
 
       // Re-fetch paragraphs to ensure validity and apply changes
       const paragraphsToUpdate = context.document.body.paragraphs;
@@ -1141,7 +1212,7 @@ export async function paraphraseDocumentStandard(): Promise<string> {
       let updatedCount = 0;
       for (let i = 0; i < metas.length; i++) {
         const meta = metas[i];
-        const newText = parts[i];
+        const newText = allParts[i];
         const p = paragraphById.get(meta.id);
 
         if (p) {
@@ -1155,8 +1226,8 @@ export async function paraphraseDocumentStandard(): Promise<string> {
       }
 
       await context.sync();
-      console.log(`Paraphrase complete. Updated ${updatedCount}/${metas.length} paragraphs.`);
-      return `Successfully paraphrased ${updatedCount} body paragraphs.`;
+      console.log(`Paraphrase complete. Updated ${updatedCount}/${metas.length} paragraphs using parallel processing.`);
+      return `Successfully paraphrased ${updatedCount} body paragraphs (parallel mode).`;
     });
   } catch (error) {
     console.error("Error in paraphraseDocumentStandard:", error);
