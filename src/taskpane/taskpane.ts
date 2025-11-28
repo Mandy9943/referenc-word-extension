@@ -6,6 +6,7 @@ import {
   insertText as insertTextInPowerPoint,
   normalizeBodyBold as normalizeBodyBoldInPowerPoint,
   paraphraseDocument as paraphraseDocumentInPowerPoint,
+  paraphraseDocumentStandard,
   removeLinks as removeLinksInPowerPoint,
   removeReferences as removeReferencesInPowerPoint,
   removeWeirdNumbers as removeWeirdNumbersInPowerPoint,
@@ -117,6 +118,8 @@ export async function paraphraseSelectedTextStandard() {
   switch (Office.context.host) {
     case Office.HostType.Word:
       return await paraphraseDocumentStandardInWord();
+    case Office.HostType.PowerPoint:
+      return await paraphraseDocumentStandard();
     default:
       throw new Error("This function is only available in Word");
   }

@@ -722,109 +722,77 @@ export async function normalizeBodyBold(): Promise<string> {
 export async function paraphraseDocument(): Promise<string> {
   try {
     return await PowerPoint.run(async (context) => {
-      console.log("paraphraseDocument => start");
+      console.log("paraphraseDocument => start (current slide only)");
 
-      const textShapes = await loadTextCapableShapes(context);
-      console.log(`paraphraseDocument => text-capable shapes loaded: ${textShapes.length}`);
+      // Get the currently selected slide
+      const selectedSlides = context.presentation.getSelectedSlides();
+      selectedSlides.load("items");
+      await context.sync();
 
-      if (!textShapes.length) {
-        return "No text content available to paraphrase";
+      if (selectedSlides.items.length === 0) {
+        return "No slide selected. Please select a slide first.";
       }
 
-      const handleByShapeId = new Map<string, TextShapeHandle>();
-      const metas: ShapeMeta[] = [];
-      let globalIndex = 0;
+      const currentSlide = selectedSlides.items[0];
+      currentSlide.load("shapes");
+      await context.sync();
 
-      for (const handle of textShapes) {
-        handleByShapeId.set(handle.shape.id, handle);
-        const rawText = await tryLoadShapeText(handle, context);
-        if (!rawText) {
-          continue;
+      console.log(`paraphraseDocument => processing slide with ${currentSlide.shapes.items.length} shapes`);
+
+      // Collect text shapes from current slide only
+      const eligibleShapes: Array<{ shape: PowerPoint.Shape; text: string; shapeIndex: number }> = [];
+
+      for (let i = 0; i < currentSlide.shapes.items.length; i++) {
+        const shape = currentSlide.shapes.items[i];
+        shape.load("type, id");
+        await context.sync();
+
+        if (!TEXT_CAPABLE_SHAPE_TYPES.has(shape.type)) continue;
+
+        // Load text
+        try {
+          shape.textFrame.textRange.load("text");
+          await context.sync();
+
+          const text = shape.textFrame.textRange.text.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+          if (!text) continue;
+
+          const words = text.split(/\s+/).filter(Boolean);
+          const isTitle = i === 0 && words.length < 10;
+
+          // Skip titles and very short text
+          if (isTitle || words.length < 11 || text.trim().endsWith(":")) {
+            console.log(`paraphraseDocument => skipping shape ${i} (title or too short)`);
+            continue;
+          }
+
+          eligibleShapes.push({ shape, text, shapeIndex: i });
+          console.log(`paraphraseDocument => queued shape ${i} for paraphrase (${words.length} words)`);
+        } catch (error) {
+          console.warn(`paraphraseDocument => unable to load text for shape ${i}`, error);
         }
-
-        const sanitized = rawText.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
-        if (!sanitized) {
-          continue;
-        }
-
-        const words = sanitized.split(/\s+/).filter(Boolean);
-        const meta: ShapeMeta = {
-          slideId: handle.slide.id,
-          slideIndex: handle.slideIndex,
-          shapeId: handle.shape.id,
-          shapeIndex: handle.shapeIndex,
-          shapeType: handle.shape.type,
-          text: sanitized,
-          wordCount: words.length,
-          isTitle: handle.shapeIndex === 0 && words.length < 10,
-          index: globalIndex++,
-        };
-
-        metas.push(meta);
       }
 
-      console.log(`paraphraseDocument => collected metas: ${metas.length}`);
-      if (metas.length === 0) {
-        return "No text content found in the presentation";
+      if (eligibleShapes.length === 0) {
+        return "No eligible text found on current slide to paraphrase.";
       }
 
-      const referenceStartIndex = findReferenceStartIndex(metas);
-      const { conclusionHeadingIndex, conclusionEndIndex } = findConclusionRange(metas, referenceStartIndex);
-      console.log(
-        "paraphraseDocument => sections",
-        JSON.stringify({ referenceStartIndex, conclusionHeadingIndex, conclusionEndIndex })
-      );
-
-      const eligibleMetas = metas.filter((meta) => {
-        if (referenceStartIndex !== -1 && meta.index >= referenceStartIndex) return false;
-        if (
-          conclusionHeadingIndex !== -1 &&
-          conclusionEndIndex !== -1 &&
-          meta.index > conclusionHeadingIndex &&
-          meta.index < conclusionEndIndex
-        )
-          return false;
-        if (matchesReferenceHeader(meta.text)) return false;
-        if (isHeadingOrTitle(meta)) return false;
-        if (meta.wordCount < 11) return false;
-        if (meta.text.trim().endsWith(":")) return false;
-        return true;
-      });
-
-      console.log(
-        "paraphraseDocument => eligible summary",
-        eligibleMetas
-          .map((meta) => ({
-            slide: meta.slideIndex,
-            shape: meta.shapeIndex,
-            words: meta.wordCount,
-            preview: meta.text.substring(0, 80),
-          }))
-          .slice(0, 5)
-      );
-
-      if (eligibleMetas.length === 0) {
-        return "No eligible text shapes found to paraphrase.";
-      }
-
+      // Build payload
       const chunks: string[] = [];
-      for (const meta of eligibleMetas) {
+      for (const item of eligibleShapes) {
         chunks.push(PARAPHRASE_DELIMITER);
-        chunks.push(meta.text);
+        chunks.push(item.text);
       }
       const payloadText = chunks.join("\n\n");
 
-      console.log(
-        `paraphraseDocument => sending ${payloadText.length} chars to paraphrase API (chunks=${eligibleMetas.length})`
-      );
+      console.log(`paraphraseDocument => sending ${payloadText.length} chars for ${eligibleShapes.length} shapes`);
 
+      // Call paraphrase API
       let response;
       try {
-        response = await fetch("https://analizeai.com/paraphrase", {
+        response = await fetch("http://localhost:3090/paraphrase", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: payloadText, freeze: [PARAPHRASE_DELIMITER] }),
         });
       } catch (networkError) {
@@ -843,55 +811,180 @@ export async function paraphraseDocument(): Promise<string> {
         throw new Error("Invalid response from paraphrase API");
       }
 
+      // Split response
       const parts = paraphrasedWholeText
         .split(new RegExp(`\\b${PARAPHRASE_DELIMITER}\\b`, "i"))
         .map((part: string) => part.trim())
         .filter((part: string) => part.length > 0);
 
-      if (parts.length !== eligibleMetas.length) {
-        console.error(
-          `paraphraseDocument => mismatch: sent ${eligibleMetas.length}, received ${parts.length} paraphrased parts`
-        );
+      if (parts.length !== eligibleShapes.length) {
+        console.error(`paraphraseDocument => mismatch: sent ${eligibleShapes.length}, received ${parts.length}`);
         throw new Error(
-          `Paraphrase count mismatch. Sent ${eligibleMetas.length}, received ${parts.length}. Aborting to prevent data loss.`
+          `Paraphrase count mismatch. Sent ${eligibleShapes.length}, received ${parts.length}. Aborting.`
         );
       }
 
+      // Apply paraphrased text to shapes
       let updatedCount = 0;
-
-      for (let i = 0; i < eligibleMetas.length; i++) {
-        const meta = eligibleMetas[i];
+      for (let i = 0; i < eligibleShapes.length; i++) {
+        const item = eligibleShapes[i];
         const newText = parts[i];
-        const handle = handleByShapeId.get(meta.shapeId);
-        if (!handle) {
-          console.warn(`paraphraseDocument => missing handle for shape ${meta.shapeId}`);
-          continue;
-        }
-
-        const shape = handle.shape;
 
         try {
-          shape.textFrame.textRange.text = newText;
-          shape.textFrame.textRange.font.bold = false;
+          console.log(`paraphraseDocument => updating shape ${item.shapeIndex}...`);
+
+          // Set the new text
+          item.shape.textFrame.textRange.text = newText;
+          item.shape.textFrame.textRange.font.bold = false;
+
+          // Sync to apply the change
           await context.sync();
+
           updatedCount++;
-          console.log(
-            `paraphraseDocument => updated slide ${meta.slideIndex} shape ${meta.shapeIndex} (${meta.wordCount} words)`,
-            {
-              oldPreview: meta.text.substring(0, 80),
-              newPreview: newText.substring(0, 80),
-            }
-          );
+          console.log(`paraphraseDocument => ✓ updated shape ${item.shapeIndex}`, {
+            oldPreview: item.text.substring(0, 60),
+            newPreview: newText.substring(0, 60),
+          });
         } catch (error) {
-          console.error(`paraphraseDocument => failed updating shape ${meta.shapeId}`, error);
+          console.error(`paraphraseDocument => failed updating shape ${item.shapeIndex}`, error);
         }
       }
 
-      return `Successfully paraphrased ${updatedCount} text shape${updatedCount === 1 ? "" : "s"}.`;
+      return `Successfully paraphrased ${updatedCount} text box${updatedCount === 1 ? "" : "es"} on current slide.`;
     });
   } catch (error) {
     console.error("Error in paraphraseDocument:", error);
-    throw new Error(`Error paraphrasing document: ${error.message}`);
+    throw new Error(`Error paraphrasing slide: ${error.message}`);
+  }
+}
+
+export async function paraphraseDocumentStandard(): Promise<string> {
+  try {
+    return await PowerPoint.run(async (context) => {
+      console.log("paraphraseDocumentStandard => start (current slide only)");
+
+      // Get the currently selected slide
+      const selectedSlides = context.presentation.getSelectedSlides();
+      selectedSlides.load("items");
+      await context.sync();
+
+      if (selectedSlides.items.length === 0) {
+        throw new Error("No slide selected");
+      }
+
+      const currentSlide = selectedSlides.items[0];
+      currentSlide.load("shapes");
+      await context.sync();
+
+      console.log(`paraphraseDocumentStandard => processing slide with ${currentSlide.shapes.items.length} shapes`);
+
+      // Collect text shapes from current slide only
+      const eligibleShapes: Array<{ shape: PowerPoint.Shape; text: string; shapeIndex: number }> = [];
+
+      for (let i = 0; i < currentSlide.shapes.items.length; i++) {
+        const shape = currentSlide.shapes.items[i];
+        if (!TEXT_CAPABLE_SHAPE_TYPES.has(shape.type)) continue;
+
+        const text = await tryLoadShapeText({ slide: currentSlide, shape, slideIndex: 0, shapeIndex: i }, context);
+        if (!text || !text.trim()) continue;
+
+        const trimmed = text.trim();
+        const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+
+        // Skip very short text boxes (likely titles)
+        if (wordCount < 15) {
+          console.log(`paraphraseDocumentStandard => skipping short shape ${i} (${wordCount} words)`);
+          continue;
+        }
+
+        // Skip reference headers
+        if (matchesReferenceHeader(trimmed)) {
+          console.log(`paraphraseDocumentStandard => skipping reference header at shape ${i}`);
+          continue;
+        }
+
+        eligibleShapes.push({ shape, text: trimmed, shapeIndex: i });
+      }
+
+      if (eligibleShapes.length === 0) {
+        return "No eligible text boxes found on current slide (need at least 15 words)";
+      }
+
+      // Build payload
+      const chunks: string[] = [];
+      for (const item of eligibleShapes) {
+        chunks.push(PARAPHRASE_DELIMITER);
+        chunks.push(item.text);
+      }
+      const payloadText = chunks.join("\n\n");
+
+      console.log(
+        `paraphraseDocumentStandard => sending ${payloadText.length} chars for ${eligibleShapes.length} shapes`
+      );
+
+      // Call paraphrase API (Standard mode)
+      let response;
+      try {
+        response = await fetch("https://analizeai.com/paraphrase-standard", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: payloadText, freeze: [PARAPHRASE_DELIMITER] }),
+        });
+      } catch (networkError) {
+        throw new Error(`Network error: ${networkError.message}`);
+      }
+
+      if (!response.ok) {
+        throw new Error(`API request failed with status ${response.status}`);
+      }
+
+      const data = await response.json();
+      const paraphrasedWholeText = data.output;
+
+      if (!paraphrasedWholeText) {
+        throw new Error("Invalid response from paraphrase API - no 'output' field");
+      }
+
+      // Split response
+      const parts = paraphrasedWholeText
+        .split(new RegExp(`\\b${PARAPHRASE_DELIMITER}\\b`, "i"))
+        .map((part: string) => part.trim())
+        .filter((part: string) => part.length > 0);
+
+      if (parts.length !== eligibleShapes.length) {
+        console.error(
+          `paraphraseDocumentStandard => count mismatch: sent ${eligibleShapes.length}, got ${parts.length}`
+        );
+        throw new Error(
+          `Paraphrase count mismatch. Sent ${eligibleShapes.length} text boxes, received ${parts.length}. Aborting to prevent data loss.`
+        );
+      }
+
+      // Apply paraphrased text to shapes
+      let updatedCount = 0;
+      for (let i = 0; i < eligibleShapes.length; i++) {
+        const item = eligibleShapes[i];
+        const newText = parts[i];
+
+        try {
+          item.shape.textFrame.textRange.text = newText;
+          item.shape.textFrame.textRange.font.bold = false;
+          await context.sync();
+
+          console.log(
+            `paraphraseDocumentStandard => updated shape ${item.shapeIndex}\nOLD: ${item.text.substring(0, 80)}...\nNEW: ${newText.substring(0, 80)}...`
+          );
+          updatedCount++;
+        } catch (updateError) {
+          console.error(`paraphraseDocumentStandard => failed to update shape ${item.shapeIndex}:`, updateError);
+        }
+      }
+
+      return `Successfully paraphrased ${updatedCount} text box${updatedCount === 1 ? "" : "es"} on current slide (Standard mode).`;
+    });
+  } catch (error) {
+    console.error("Error in paraphraseDocumentStandard:", error);
+    throw new Error(`Error paraphrasing slide: ${error.message}`);
   }
 }
 
@@ -909,7 +1002,7 @@ export async function paraphraseSelectedText(): Promise<string> {
       }
 
       try {
-        const response = await fetch("https://analizeai.com/paraphrase", {
+        const response = await fetch("http://localhost:3090/paraphrase", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: selectedText.trim() }),
