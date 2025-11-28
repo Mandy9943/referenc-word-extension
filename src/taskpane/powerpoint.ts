@@ -790,7 +790,7 @@ export async function paraphraseDocument(): Promise<string> {
       // Call paraphrase API
       let response;
       try {
-        response = await fetch("http://localhost:3090/paraphrase", {
+        response = await fetch("https://analizeai.com/paraphrase", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: payloadText, freeze: [PARAPHRASE_DELIMITER] }),
@@ -1002,7 +1002,7 @@ export async function paraphraseSelectedText(): Promise<string> {
       }
 
       try {
-        const response = await fetch("http://localhost:3090/paraphrase", {
+        const response = await fetch("https://analizeai.com/paraphrase", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: selectedText.trim() }),
