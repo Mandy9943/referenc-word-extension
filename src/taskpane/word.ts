@@ -807,16 +807,32 @@ export async function paraphraseDocument(): Promise<string> {
 
       console.log(`Found ${metas.length} body paragraphs to paraphrase.`);
 
-      // Split metas into two halves for parallel processing
-      const midpoint = Math.ceil(metas.length / 2);
-      const firstHalf = metas.slice(0, midpoint);
-      const secondHalf = metas.slice(midpoint);
+      // Calculate total word count
+      const totalWords = metas.reduce((sum, meta) => {
+        return sum + meta.text.split(/\s+/).filter(Boolean).length;
+      }, 0);
+      console.log(`Total word count: ${totalWords}`);
 
-      console.log(
-        `Splitting work: ${firstHalf.length} paragraphs to analizeai.com, ${secondHalf.length} to v2.analizeai.com`
-      );
+      // Determine number of instances based on word count
+      let numInstances = 1;
+      if (totalWords >= 3000) {
+        numInstances = 4;
+      } else if (totalWords >= 2000) {
+        numInstances = 3;
+      } else if (totalWords >= 500) {
+        numInstances = 2;
+      }
 
-      // Build payloads for both halves
+      const serviceUrls = [
+        "https://analizeai.com/paraphrase",
+        "https://v2.analizeai.com/paraphrase",
+        "https://v3.analizeai.com/paraphrase",
+        "https://v4.analizeai.com/paraphrase",
+      ];
+
+      console.log(`Using ${numInstances} instance(s) for processing`);
+
+      // Build payloads helper
       const buildPayload = (metaArray: ParaphraseParagraphMeta[]) => {
         const chunks: string[] = [];
         for (const meta of metaArray) {
@@ -826,50 +842,51 @@ export async function paraphraseDocument(): Promise<string> {
         return chunks.join("\n\n");
       };
 
-      const payloadFirst = buildPayload(firstHalf);
-      const payloadSecond = buildPayload(secondHalf);
-
-      console.log(`First half payload: ${payloadFirst.length} characters`);
-      console.log(`Second half payload: ${payloadSecond.length} characters`);
-
-      // Send both requests in parallel
-      console.log("Sending parallel requests to both services...");
-      const [responseFirst, responseSecond] = await Promise.all([
-        fetch("https://analizeai.com/paraphrase", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ text: payloadFirst, freeze: [PARAPHRASE_DELIMITER] }),
-        }),
-        fetch("https://v2.analizeai.com/paraphrase", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ text: payloadSecond, freeze: [PARAPHRASE_DELIMITER] }),
-        }),
-      ]);
-
-      if (!responseFirst.ok) {
-        throw new Error(`API request to analizeai.com failed with status ${responseFirst.status}`);
-      }
-      if (!responseSecond.ok) {
-        throw new Error(`API request to v2.analizeai.com failed with status ${responseSecond.status}`);
+      // Split metas across instances
+      const chunkSize = Math.ceil(metas.length / numInstances);
+      const chunks: ParaphraseParagraphMeta[][] = [];
+      for (let i = 0; i < numInstances; i++) {
+        const start = i * chunkSize;
+        const end = Math.min(start + chunkSize, metas.length);
+        chunks.push(metas.slice(start, end));
       }
 
-      console.log("Both responses received, parsing...");
+      // Log distribution
+      chunks.forEach((chunk, idx) => {
+        console.log(`Instance ${idx + 1} (${serviceUrls[idx]}): ${chunk.length} paragraphs`);
+      });
 
-      const [dataFirst, dataSecond] = await Promise.all([responseFirst.json(), responseSecond.json()]);
+      // Send all requests in parallel
+      console.log("Sending parallel requests to services...");
+      const responses = await Promise.all(
+        chunks.map((chunk, idx) =>
+          fetch(serviceUrls[idx], {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ text: buildPayload(chunk), freeze: [PARAPHRASE_DELIMITER] }),
+          })
+        )
+      );
 
-      const paraphrasedFirstHalf = dataFirst.secondMode;
-      const paraphrasedSecondHalf = dataSecond.secondMode;
+      // Check all responses
+      responses.forEach((response, idx) => {
+        if (!response.ok) {
+          throw new Error(`API request to ${serviceUrls[idx]} failed with status ${response.status}`);
+        }
+      });
 
-      if (!paraphrasedFirstHalf || !paraphrasedSecondHalf) {
+      console.log("All responses received, parsing...");
+
+      const allData = await Promise.all(responses.map((r) => r.json()));
+      const paraphrasedChunks = allData.map((data) => data.secondMode);
+
+      if (paraphrasedChunks.some((chunk) => !chunk)) {
         throw new Error("Invalid response from paraphrase API");
       }
 
-      // Parse both responses
+      // Parse all responses
       const parseResponse = (text: string) => {
         return text
           .split(new RegExp(`\\b${PARAPHRASE_DELIMITER}\\b`, "i"))
@@ -877,28 +894,25 @@ export async function paraphraseDocument(): Promise<string> {
           .filter((x: string) => x.length > 0);
       };
 
-      const partsFirst = parseResponse(paraphrasedFirstHalf);
-      const partsSecond = parseResponse(paraphrasedSecondHalf);
+      const allParsedChunks = paraphrasedChunks.map((chunk) => parseResponse(chunk));
 
-      console.log(`Received ${partsFirst.length} parts from first service`);
-      console.log(`Received ${partsSecond.length} parts from second service`);
+      // Log received counts
+      allParsedChunks.forEach((parsed, idx) => {
+        console.log(`Received ${parsed.length} parts from service ${idx + 1}`);
+      });
 
       // Validate counts
-      if (partsFirst.length !== firstHalf.length) {
-        console.error(`First half mismatch: sent ${firstHalf.length}, received ${partsFirst.length}`);
-        throw new Error(
-          `First half paraphrase count mismatch. Sent ${firstHalf.length}, received ${partsFirst.length}. Aborting to prevent data loss.`
-        );
-      }
-      if (partsSecond.length !== secondHalf.length) {
-        console.error(`Second half mismatch: sent ${secondHalf.length}, received ${partsSecond.length}`);
-        throw new Error(
-          `Second half paraphrase count mismatch. Sent ${secondHalf.length}, received ${partsSecond.length}. Aborting to prevent data loss.`
-        );
-      }
+      allParsedChunks.forEach((parsed, idx) => {
+        if (parsed.length !== chunks[idx].length) {
+          console.error(`Instance ${idx + 1} mismatch: sent ${chunks[idx].length}, received ${parsed.length}`);
+          throw new Error(
+            `Instance ${idx + 1} paraphrase count mismatch. Sent ${chunks[idx].length}, received ${parsed.length}. Aborting to prevent data loss.`
+          );
+        }
+      });
 
       // Combine results in order
-      const allParts = [...partsFirst, ...partsSecond];
+      const allParts = allParsedChunks.flat();
       console.log(`Combined total: ${allParts.length} paraphrased paragraphs`);
 
       // Re-fetch paragraphs to ensure validity and apply changes
@@ -1105,16 +1119,32 @@ export async function paraphraseDocumentStandard(): Promise<string> {
 
       console.log(`Found ${metas.length} body paragraphs to paraphrase.`);
 
-      // Split metas into two halves for parallel processing
-      const midpoint = Math.ceil(metas.length / 2);
-      const firstHalf = metas.slice(0, midpoint);
-      const secondHalf = metas.slice(midpoint);
+      // Calculate total word count
+      const totalWords = metas.reduce((sum, meta) => {
+        return sum + meta.text.split(/\s+/).filter(Boolean).length;
+      }, 0);
+      console.log(`Total word count: ${totalWords}`);
 
-      console.log(
-        `Splitting work: ${firstHalf.length} paragraphs to analizeai.com, ${secondHalf.length} to v2.analizeai.com`
-      );
+      // Determine number of instances based on word count
+      let numInstances = 1;
+      if (totalWords >= 3000) {
+        numInstances = 4;
+      } else if (totalWords >= 2000) {
+        numInstances = 3;
+      } else if (totalWords >= 500) {
+        numInstances = 2;
+      }
 
-      // Build payloads for both halves
+      const serviceUrls = [
+        "https://analizeai.com/paraphrase-standard",
+        "https://v2.analizeai.com/paraphrase-standard",
+        "https://v3.analizeai.com/paraphrase-standard",
+        "https://v4.analizeai.com/paraphrase-standard",
+      ];
+
+      console.log(`Using ${numInstances} instance(s) for processing`);
+
+      // Build payloads helper
       const buildPayload = (metaArray: ParaphraseParagraphMeta[]) => {
         const chunks: string[] = [];
         for (const meta of metaArray) {
@@ -1124,50 +1154,51 @@ export async function paraphraseDocumentStandard(): Promise<string> {
         return chunks.join("\n\n");
       };
 
-      const payloadFirst = buildPayload(firstHalf);
-      const payloadSecond = buildPayload(secondHalf);
-
-      console.log(`First half payload: ${payloadFirst.length} characters`);
-      console.log(`Second half payload: ${payloadSecond.length} characters`);
-
-      // Send both requests in parallel
-      console.log("Sending parallel requests to both services...");
-      const [responseFirst, responseSecond] = await Promise.all([
-        fetch("https://analizeai.com/paraphrase-standard", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ text: payloadFirst, freeze: [PARAPHRASE_DELIMITER] }),
-        }),
-        fetch("https://v2.analizeai.com/paraphrase-standard", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ text: payloadSecond, freeze: [PARAPHRASE_DELIMITER] }),
-        }),
-      ]);
-
-      if (!responseFirst.ok) {
-        throw new Error(`API request to analizeai.com failed with status ${responseFirst.status}`);
-      }
-      if (!responseSecond.ok) {
-        throw new Error(`API request to v2.analizeai.com failed with status ${responseSecond.status}`);
+      // Split metas across instances
+      const chunkSize = Math.ceil(metas.length / numInstances);
+      const chunks: ParaphraseParagraphMeta[][] = [];
+      for (let i = 0; i < numInstances; i++) {
+        const start = i * chunkSize;
+        const end = Math.min(start + chunkSize, metas.length);
+        chunks.push(metas.slice(start, end));
       }
 
-      console.log("Both responses received, parsing...");
+      // Log distribution
+      chunks.forEach((chunk, idx) => {
+        console.log(`Instance ${idx + 1} (${serviceUrls[idx]}): ${chunk.length} paragraphs`);
+      });
 
-      const [dataFirst, dataSecond] = await Promise.all([responseFirst.json(), responseSecond.json()]);
+      // Send all requests in parallel
+      console.log("Sending parallel requests to services...");
+      const responses = await Promise.all(
+        chunks.map((chunk, idx) =>
+          fetch(serviceUrls[idx], {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ text: buildPayload(chunk), freeze: [PARAPHRASE_DELIMITER] }),
+          })
+        )
+      );
 
-      const paraphrasedFirstHalf = dataFirst.output;
-      const paraphrasedSecondHalf = dataSecond.output;
+      // Check all responses
+      responses.forEach((response, idx) => {
+        if (!response.ok) {
+          throw new Error(`API request to ${serviceUrls[idx]} failed with status ${response.status}`);
+        }
+      });
 
-      if (!paraphrasedFirstHalf || !paraphrasedSecondHalf) {
+      console.log("All responses received, parsing...");
+
+      const allData = await Promise.all(responses.map((r) => r.json()));
+      const paraphrasedChunks = allData.map((data) => data.output);
+
+      if (paraphrasedChunks.some((chunk) => !chunk)) {
         throw new Error("Invalid response from paraphrase API");
       }
 
-      // Parse both responses
+      // Parse all responses
       const parseResponse = (text: string) => {
         return text
           .split(new RegExp(`\\b${PARAPHRASE_DELIMITER}\\b`, "i"))
@@ -1175,28 +1206,25 @@ export async function paraphraseDocumentStandard(): Promise<string> {
           .filter((x: string) => x.length > 0);
       };
 
-      const partsFirst = parseResponse(paraphrasedFirstHalf);
-      const partsSecond = parseResponse(paraphrasedSecondHalf);
+      const allParsedChunks = paraphrasedChunks.map((chunk) => parseResponse(chunk));
 
-      console.log(`Received ${partsFirst.length} parts from first service`);
-      console.log(`Received ${partsSecond.length} parts from second service`);
+      // Log received counts
+      allParsedChunks.forEach((parsed, idx) => {
+        console.log(`Received ${parsed.length} parts from service ${idx + 1}`);
+      });
 
       // Validate counts
-      if (partsFirst.length !== firstHalf.length) {
-        console.error(`First half mismatch: sent ${firstHalf.length}, received ${partsFirst.length}`);
-        throw new Error(
-          `First half paraphrase count mismatch. Sent ${firstHalf.length}, received ${partsFirst.length}. Aborting to prevent data loss.`
-        );
-      }
-      if (partsSecond.length !== secondHalf.length) {
-        console.error(`Second half mismatch: sent ${secondHalf.length}, received ${partsSecond.length}`);
-        throw new Error(
-          `Second half paraphrase count mismatch. Sent ${secondHalf.length}, received ${partsSecond.length}. Aborting to prevent data loss.`
-        );
-      }
+      allParsedChunks.forEach((parsed, idx) => {
+        if (parsed.length !== chunks[idx].length) {
+          console.error(`Instance ${idx + 1} mismatch: sent ${chunks[idx].length}, received ${parsed.length}`);
+          throw new Error(
+            `Instance ${idx + 1} paraphrase count mismatch. Sent ${chunks[idx].length}, received ${parsed.length}. Aborting to prevent data loss.`
+          );
+        }
+      });
 
       // Combine results in order
-      const allParts = [...partsFirst, ...partsSecond];
+      const allParts = allParsedChunks.flat();
       console.log(`Combined total: ${allParts.length} paraphrased paragraphs`);
 
       // Re-fetch paragraphs to ensure validity and apply changes
