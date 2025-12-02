@@ -99,12 +99,18 @@ const useStyles = makeStyles({
 
 type Status = "idle" | "loading" | "success" | "error";
 
+interface FailedService {
+  url: string;
+  instanceNumber: number;
+}
+
 const App: React.FC = () => {
   const styles = useStyles();
   const [status, setStatus] = React.useState<Status>("idle");
   const [isValidHost, setIsValidHost] = React.useState(false);
   const [insertEveryOther, setInsertEveryOther] = React.useState(false);
   const [paraphraseTime, setParaphraseTime] = React.useState<number | null>(null);
+  const [failedService, setFailedService] = React.useState<FailedService | null>(null);
   const timerRef = React.useRef<any>(null);
 
   React.useEffect(() => {
@@ -140,6 +146,7 @@ const App: React.FC = () => {
   const handleParaphraseText = async () => {
     setStatus("loading");
     setParaphraseTime(0);
+    setFailedService(null);
     const startTime = Date.now();
 
     if (timerRef.current) clearInterval(timerRef.current);
@@ -151,8 +158,18 @@ const App: React.FC = () => {
     try {
       await paraphraseSelectedText();
       setStatus("success");
+      setFailedService(null);
     } catch (error) {
       setStatus("error");
+      // Extract failed service info from error message if available
+      if (error.message && error.message.includes("failed with status")) {
+        const match = error.message.match(/API request to (https:\/\/[^\s]+) failed/);
+        if (match) {
+          const url = match[1];
+          const instanceNumber = url.includes("v4") ? 4 : url.includes("v3") ? 3 : url.includes("v2") ? 2 : 1;
+          setFailedService({ url, instanceNumber });
+        }
+      }
     } finally {
       if (timerRef.current) {
         clearInterval(timerRef.current);
@@ -164,6 +181,7 @@ const App: React.FC = () => {
   const handleParaphraseTextStandard = async () => {
     setStatus("loading");
     setParaphraseTime(0);
+    setFailedService(null);
     const startTime = Date.now();
 
     if (timerRef.current) clearInterval(timerRef.current);
@@ -175,13 +193,47 @@ const App: React.FC = () => {
     try {
       await paraphraseDocumentStandard();
       setStatus("success");
+      setFailedService(null);
     } catch (error) {
       setStatus("error");
+      // Extract failed service info from error message if available
+      if (error.message && error.message.includes("failed with status")) {
+        const match = error.message.match(/API request to (https:\/\/[^\s]+) failed/);
+        if (match) {
+          const url = match[1];
+          const instanceNumber = url.includes("v4") ? 4 : url.includes("v3") ? 3 : url.includes("v2") ? 2 : 1;
+          setFailedService({ url, instanceNumber });
+        }
+      }
     } finally {
       if (timerRef.current) {
         clearInterval(timerRef.current);
         timerRef.current = null;
       }
+    }
+  };
+
+  const handleRestartService = async () => {
+    if (!failedService) return;
+
+    try {
+      setStatus("loading");
+      const restartUrl = `${failedService.url}/restart`;
+      console.log(`Restarting service: ${restartUrl}`);
+
+      const response = await fetch(restartUrl, {
+        method: "POST",
+      });
+
+      if (response.ok) {
+        setStatus("success");
+        setFailedService(null);
+      } else {
+        setStatus("error");
+      }
+    } catch (error) {
+      console.error("Error restarting service:", error);
+      setStatus("error");
     }
   };
 
@@ -204,6 +256,11 @@ const App: React.FC = () => {
         return (
           <div className={baseClassName + styles.statusError}>
             <Text>An error occurred. Please try again.</Text>
+            {failedService && (
+              <Button appearance="primary" onClick={handleRestartService} style={{ marginTop: "10px" }}>
+                Restart Paraphrase {failedService.instanceNumber}
+              </Button>
+            )}
           </div>
         );
       default:
@@ -272,7 +329,7 @@ const App: React.FC = () => {
             This add-in is optimized for Word and PowerPoint. Some features may not be available in other applications.
           </Text>
         )}
-        v2.12
+        v2.13
         {getStatusDisplay()}
         {paraphraseTime !== null && (
           <div
