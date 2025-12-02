@@ -815,9 +815,7 @@ export async function paraphraseDocument(): Promise<string> {
 
       // Determine number of instances based on word count
       let numInstances = 1;
-      if (totalWords >= 3000) {
-        numInstances = 4;
-      } else if (totalWords >= 2000) {
+      if (totalWords > 1500) {
         numInstances = 3;
       } else if (totalWords >= 500) {
         numInstances = 2;
@@ -827,7 +825,6 @@ export async function paraphraseDocument(): Promise<string> {
         "https://analizeai.com/paraphrase",
         "https://v2.analizeai.com/paraphrase",
         "https://v3.analizeai.com/paraphrase",
-        "https://v4.analizeai.com/paraphrase",
       ];
 
       console.log(`Using ${numInstances} instance(s) for processing`);
@@ -1127,9 +1124,7 @@ export async function paraphraseDocumentStandard(): Promise<string> {
 
       // Determine number of instances based on word count
       let numInstances = 1;
-      if (totalWords >= 3000) {
-        numInstances = 4;
-      } else if (totalWords >= 2000) {
+      if (totalWords > 1500) {
         numInstances = 3;
       } else if (totalWords >= 500) {
         numInstances = 2;
@@ -1139,7 +1134,6 @@ export async function paraphraseDocumentStandard(): Promise<string> {
         "https://analizeai.com/paraphrase-standard",
         "https://v2.analizeai.com/paraphrase-standard",
         "https://v3.analizeai.com/paraphrase-standard",
-        "https://v4.analizeai.com/paraphrase-standard",
       ];
 
       console.log(`Using ${numInstances} instance(s) for processing`);

@@ -166,7 +166,7 @@ const App: React.FC = () => {
         const match = error.message.match(/API request to (https:\/\/[^\s]+) failed/);
         if (match) {
           const url = match[1];
-          const instanceNumber = url.includes("v4") ? 4 : url.includes("v3") ? 3 : url.includes("v2") ? 2 : 1;
+          const instanceNumber = url.includes("v3") ? 3 : url.includes("v2") ? 2 : 1;
           setFailedService({ url, instanceNumber });
         }
       }
@@ -201,7 +201,7 @@ const App: React.FC = () => {
         const match = error.message.match(/API request to (https:\/\/[^\s]+) failed/);
         if (match) {
           const url = match[1];
-          const instanceNumber = url.includes("v4") ? 4 : url.includes("v3") ? 3 : url.includes("v2") ? 2 : 1;
+          const instanceNumber = url.includes("v3") ? 3 : url.includes("v2") ? 2 : 1;
           setFailedService({ url, instanceNumber });
         }
       }
@@ -329,7 +329,7 @@ const App: React.FC = () => {
             This add-in is optimized for Word and PowerPoint. Some features may not be available in other applications.
           </Text>
         )}
-        v2.13
+        v2.14
         {getStatusDisplay()}
         {paraphraseTime !== null && (
           <div
