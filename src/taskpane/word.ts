@@ -884,14 +884,49 @@ export async function paraphraseDocument(): Promise<string> {
       }
 
       // Parse all responses
-      const parseResponse = (text: string) => {
-        return text
-          .split(new RegExp(`\\b${PARAPHRASE_DELIMITER}\\b`, "i"))
+      const parseResponse = (text: string, expectedCount: number) => {
+        // 1. Initial split by delimiter (relaxed regex without \\b to catch cases where delimiter is attached to words)
+        let parts = text
+          .split(new RegExp(`${PARAPHRASE_DELIMITER}`, "i"))
           .map((x: string) => x.trim())
           .filter((x: string) => x.length > 0);
+
+        // 2. Recovery Strategy: If we have fewer parts than expected, check for merged paragraphs
+        // separated by double newlines.
+        if (parts.length < expectedCount) {
+          console.warn(
+            `Mismatch detected (Expected ${expectedCount}, got ${parts.length}). Attempting to recover merged paragraphs via line breaks...`
+          );
+
+          const recoveredParts: string[] = [];
+          for (const part of parts) {
+            // Check if this part might actually be multiple paragraphs
+            // Heuristic: If it contains double newlines, it might be merged instances
+            if (part.includes("\n\n")) {
+              const subParts = part
+                .split(/\n\n+/) // Split by 2 or more newlines
+                .map((p) => p.trim())
+                .filter((p) => p.length > 0);
+              recoveredParts.push(...subParts);
+            } else {
+              recoveredParts.push(part);
+            }
+          }
+
+          // Only use recovered parts if it gets us closer to or exactly the expected count
+          if (recoveredParts.length === expectedCount) {
+            console.log("Successfully recovered merged paragraphs!");
+            return recoveredParts;
+          } else if (Math.abs(recoveredParts.length - expectedCount) < Math.abs(parts.length - expectedCount)) {
+            console.log(`Partial recovery: now have ${recoveredParts.length} parts.`);
+            return recoveredParts;
+          }
+        }
+
+        return parts;
       };
 
-      const allParsedChunks = paraphrasedChunks.map((chunk) => parseResponse(chunk));
+      const allParsedChunks = chunks.map((chunk, idx) => parseResponse(paraphrasedChunks[idx], chunk.length));
 
       // Log received counts
       allParsedChunks.forEach((parsed, idx) => {
