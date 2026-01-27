@@ -5,8 +5,9 @@ import * as React from "react";
 import {
   analyzeDocument,
   normalizeBoldText,
-  paraphraseSelectedTextStandard as paraphraseDocumentStandard,
+  ParaphraseResult,
   paraphraseSelectedText,
+  paraphraseSelectedTextStandard,
   removeLinks,
   removeReferences,
   removeWeirdNumbers,
@@ -67,6 +68,12 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground3,
     color: tokens.colorNeutralForeground3,
   },
+  statusWarning: {
+    backgroundColor: tokens.colorPaletteYellowBackground1,
+    color: tokens.colorPaletteYellowForeground1,
+    marginTop: "8px",
+    fontSize: "12px",
+  },
   buttonGreen: {
     backgroundColor: "#008000",
     color: tokens.colorNeutralForegroundOnBrand,
@@ -99,9 +106,8 @@ const useStyles = makeStyles({
 
 type Status = "idle" | "loading" | "success" | "error";
 
-interface FailedService {
-  url: string;
-  instanceNumber: number;
+interface FailedAccount {
+  accountId: string;
 }
 
 const App: React.FC = () => {
@@ -110,7 +116,9 @@ const App: React.FC = () => {
   const [isValidHost, setIsValidHost] = React.useState(false);
   const [insertEveryOther, setInsertEveryOther] = React.useState(false);
   const [paraphraseTime, setParaphraseTime] = React.useState<number | null>(null);
-  const [failedService, setFailedService] = React.useState<FailedService | null>(null);
+  const [failedAccount, setFailedAccount] = React.useState<FailedAccount | null>(null);
+  const [warnings, setWarnings] = React.useState<string[]>([]);
+  const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
   const timerRef = React.useRef<any>(null);
 
   React.useEffect(() => {
@@ -121,17 +129,22 @@ const App: React.FC = () => {
 
   const handleAnalyzeDocument = async () => {
     setStatus("loading");
+    setWarnings([]);
+    setErrorMessage(null);
     try {
       // @ts-ignore
       await analyzeDocument(insertEveryOther);
       setStatus("success");
     } catch (error) {
       setStatus("error");
+      setErrorMessage(error.message || "An error occurred");
     }
   };
 
   const handleClean = async () => {
     setStatus("loading");
+    setWarnings([]);
+    setErrorMessage(null);
     try {
       await removeReferences();
       await removeLinks(false);
@@ -140,13 +153,16 @@ const App: React.FC = () => {
       setStatus("success");
     } catch (error) {
       setStatus("error");
+      setErrorMessage(error.message || "An error occurred");
     }
   };
 
   const handleParaphraseText = async () => {
     setStatus("loading");
     setParaphraseTime(0);
-    setFailedService(null);
+    setFailedAccount(null);
+    setWarnings([]);
+    setErrorMessage(null);
     const startTime = Date.now();
 
     if (timerRef.current) clearInterval(timerRef.current);
@@ -156,18 +172,20 @@ const App: React.FC = () => {
     }, 100);
 
     try {
-      await paraphraseSelectedText();
+      const result: ParaphraseResult = await paraphraseSelectedText();
       setStatus("success");
-      setFailedService(null);
+      setFailedAccount(null);
+      if (result.warnings && result.warnings.length > 0) {
+        setWarnings(result.warnings);
+      }
     } catch (error) {
       setStatus("error");
-      // Extract failed service info from error message if available
-      if (error.message && error.message.includes("failed with status")) {
-        const match = error.message.match(/API request to (https:\/\/[^\s]+) failed/);
+      setErrorMessage(error.message || "An error occurred");
+      // Extract failed account info from error message if available
+      if (error.message) {
+        const match = error.message.match(/Account (acc[123]) failed/);
         if (match) {
-          const url = match[1];
-          const instanceNumber = url.includes("v3") ? 3 : url.includes("v2") ? 2 : 1;
-          setFailedService({ url, instanceNumber });
+          setFailedAccount({ accountId: match[1] });
         }
       }
     } finally {
@@ -181,7 +199,9 @@ const App: React.FC = () => {
   const handleParaphraseTextStandard = async () => {
     setStatus("loading");
     setParaphraseTime(0);
-    setFailedService(null);
+    setFailedAccount(null);
+    setWarnings([]);
+    setErrorMessage(null);
     const startTime = Date.now();
 
     if (timerRef.current) clearInterval(timerRef.current);
@@ -191,18 +211,20 @@ const App: React.FC = () => {
     }, 100);
 
     try {
-      await paraphraseDocumentStandard();
+      const result: ParaphraseResult = await paraphraseSelectedTextStandard();
       setStatus("success");
-      setFailedService(null);
+      setFailedAccount(null);
+      if (result.warnings && result.warnings.length > 0) {
+        setWarnings(result.warnings);
+      }
     } catch (error) {
       setStatus("error");
-      // Extract failed service info from error message if available
-      if (error.message && error.message.includes("failed with status")) {
-        const match = error.message.match(/API request to (https:\/\/[^\s]+) failed/);
+      setErrorMessage(error.message || "An error occurred");
+      // Extract failed account info from error message if available
+      if (error.message) {
+        const match = error.message.match(/Account (acc[123]) failed/);
         if (match) {
-          const url = match[1];
-          const instanceNumber = url.includes("v3") ? 3 : url.includes("v2") ? 2 : 1;
-          setFailedService({ url, instanceNumber });
+          setFailedAccount({ accountId: match[1] });
         }
       }
     } finally {
@@ -213,13 +235,13 @@ const App: React.FC = () => {
     }
   };
 
-  const handleRestartService = async () => {
-    if (!failedService) return;
+  const handleRestartAccount = async () => {
+    if (!failedAccount) return;
 
     try {
       setStatus("loading");
-      const restartUrl = `${failedService.url}/restart`;
-      console.log(`Restarting service: ${restartUrl}`);
+      const restartUrl = `https://analizeai.com/restart/${failedAccount.accountId}`;
+      console.log(`Restarting account: ${restartUrl}`);
 
       const response = await fetch(restartUrl, {
         method: "POST",
@@ -227,13 +249,16 @@ const App: React.FC = () => {
 
       if (response.ok) {
         setStatus("success");
-        setFailedService(null);
+        setFailedAccount(null);
+        setErrorMessage(null);
       } else {
         setStatus("error");
+        setErrorMessage(`Failed to restart account: ${response.status}`);
       }
     } catch (error) {
-      console.error("Error restarting service:", error);
+      console.error("Error restarting account:", error);
       setStatus("error");
+      setErrorMessage(error.message || "Failed to restart account");
     }
   };
 
@@ -248,17 +273,29 @@ const App: React.FC = () => {
         );
       case "success":
         return (
-          <div className={baseClassName + styles.statusSuccess}>
-            <Text>Operation completed successfully!</Text>
-          </div>
+          <>
+            <div className={baseClassName + styles.statusSuccess}>
+              <Text>Operation completed successfully!</Text>
+            </div>
+            {warnings.length > 0 && (
+              <div className={baseClassName + styles.statusWarning}>
+                <Text weight="semibold">Warnings:</Text>
+                {warnings.map((warning, idx) => (
+                  <div key={idx} style={{ marginTop: "4px" }}>
+                    <Text size={200}>• {warning}</Text>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
         );
       case "error":
         return (
           <div className={baseClassName + styles.statusError}>
-            <Text>An error occurred. Please try again.</Text>
-            {failedService && (
-              <Button appearance="primary" onClick={handleRestartService} style={{ marginTop: "10px" }}>
-                Restart Paraphrase {failedService.instanceNumber}
+            <Text>{errorMessage || "An error occurred. Please try again."}</Text>
+            {failedAccount && (
+              <Button appearance="primary" onClick={handleRestartAccount} style={{ marginTop: "10px" }}>
+                Restart Account {failedAccount.accountId}
               </Button>
             )}
           </div>
@@ -329,7 +366,7 @@ const App: React.FC = () => {
             This add-in is optimized for Word and PowerPoint. Some features may not be available in other applications.
           </Text>
         )}
-        v2.14
+        v3.0
         {getStatusDisplay()}
         {paraphraseTime !== null && (
           <div

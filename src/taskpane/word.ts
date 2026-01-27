@@ -1,5 +1,114 @@
-/* global Word console, fetch */
+/* global Word console, fetch, AbortController, setTimeout, clearTimeout */
 import { getFormattedReferences } from "./gemini";
+
+// ==================== Batch API Configuration ====================
+const BATCH_API_URL = "https://analizeai.com/paraphrase-batch";
+const HEALTH_CHECK_URL = "https://analizeai.com/health";
+const HEALTH_CHECK_TIMEOUT = 2000; // 2 seconds
+const ACCOUNT_KEYS = ["acc1", "acc2", "acc3"] as const;
+
+type AccountKey = (typeof ACCOUNT_KEYS)[number];
+
+// Result type for paraphrase functions with warnings support
+export interface ParaphraseResult {
+  message: string;
+  warnings: string[];
+}
+
+// Health check response type
+interface HealthCheckResponse {
+  status: string;
+  acc1?: { status: string };
+  acc2?: { status: string };
+  acc3?: { status: string };
+  ready?: boolean;
+}
+
+// Batch API response types
+interface BatchAccountResult {
+  firstMode?: string;
+  secondMode?: string;
+  result?: string;
+  durationMs?: number;
+  error?: string;
+  fallbackUsed?: string;
+}
+
+interface BatchApiResponse {
+  acc1?: BatchAccountResult;
+  acc2?: BatchAccountResult;
+  acc3?: BatchAccountResult;
+}
+
+/**
+ * Check service health with a 2-second timeout.
+ * Returns warnings for accounts that are not ready, but never throws.
+ */
+async function checkServiceHealth(): Promise<{ ready: boolean; warnings: string[] }> {
+  const warnings: string[] = [];
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), HEALTH_CHECK_TIMEOUT);
+
+    const response = await fetch(HEALTH_CHECK_URL, {
+      method: "GET",
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      warnings.push(`Health check returned status ${response.status}`);
+      return { ready: false, warnings };
+    }
+
+    const data: HealthCheckResponse = await response.json();
+
+    // Check each account status
+    for (const key of ACCOUNT_KEYS) {
+      const accountStatus = data[key]?.status;
+      if (accountStatus && accountStatus !== "ready") {
+        warnings.push(`Account ${key} is ${accountStatus}`);
+      }
+    }
+
+    return { ready: data.ready ?? true, warnings };
+  } catch (error) {
+    if (error.name === "AbortError") {
+      warnings.push("Health check timed out (service may be slow)");
+    } else {
+      warnings.push(`Health check failed: ${error.message}`);
+    }
+    return { ready: false, warnings };
+  }
+}
+
+/**
+ * Collect warnings from batch API response for accounts that had errors or used fallback
+ */
+function collectBatchWarnings(data: BatchApiResponse, usedAccounts: AccountKey[]): string[] {
+  const warnings: string[] = [];
+
+  for (const key of usedAccounts) {
+    const result = data[key];
+    if (!result) continue;
+
+    if (result.error) {
+      if (result.fallbackUsed) {
+        warnings.push(`${key} failed (${result.error}), used ${result.fallbackUsed} as fallback`);
+      } else {
+        warnings.push(`${key} error: ${result.error}`);
+      }
+    } else if (result.fallbackUsed) {
+      warnings.push(`${key} used ${result.fallbackUsed} as fallback`);
+    }
+  }
+
+  return warnings;
+}
+
+// ==================== End Batch API Configuration ====================
 
 const TRAILING_PUNCTUATION = "[-:;,.!?–—]*";
 // Allow for "1.", "1.1", "IV.", "2 " prefixes. Changed \s+ to \s* to allow "1.Conclusion"
@@ -745,10 +854,18 @@ interface ParaphraseParagraphMeta {
 
 const PARAPHRASE_DELIMITER = "qbpdelim123";
 
-export async function paraphraseDocument(): Promise<string> {
+export async function paraphraseDocument(): Promise<ParaphraseResult> {
   try {
     return await Word.run(async (context) => {
-      console.log("Starting document paraphrase (Simple + Short mode with parallel processing)...");
+      console.log("Starting document paraphrase (Simple + Short mode with batch API)...");
+      const allWarnings: string[] = [];
+
+      // Health check (non-blocking)
+      const healthResult = await checkServiceHealth();
+      if (healthResult.warnings.length > 0) {
+        console.warn("Health check warnings:", healthResult.warnings);
+        allWarnings.push(...healthResult.warnings);
+      }
 
       const paragraphs = context.document.body.paragraphs;
       paragraphs.load("items/text, items/outlineLevel, items/uniqueLocalId");
@@ -802,7 +919,7 @@ export async function paraphraseDocument(): Promise<string> {
       }
 
       if (metas.length === 0) {
-        return "No body paragraphs found to paraphrase.";
+        return { message: "No body paragraphs found to paraphrase.", warnings: allWarnings };
       }
 
       console.log(`Found ${metas.length} body paragraphs to paraphrase.`);
@@ -813,21 +930,15 @@ export async function paraphraseDocument(): Promise<string> {
       }, 0);
       console.log(`Total word count: ${totalWords}`);
 
-      // Determine number of instances based on word count
-      let numInstances = 1;
+      // Determine number of accounts to use based on word count
+      let numAccounts = 1;
       if (totalWords > 1500) {
-        numInstances = 3;
+        numAccounts = 3;
       } else if (totalWords >= 500) {
-        numInstances = 2;
+        numAccounts = 2;
       }
 
-      const serviceUrls = [
-        "https://analizeai.com/paraphrase",
-        "https://v2.analizeai.com/paraphrase",
-        "https://v3.analizeai.com/paraphrase",
-      ];
-
-      console.log(`Using ${numInstances} instance(s) for processing`);
+      console.log(`Using ${numAccounts} account(s) for processing via batch API`);
 
       // Build payloads helper
       const buildPayload = (metaArray: ParaphraseParagraphMeta[]) => {
@@ -839,48 +950,66 @@ export async function paraphraseDocument(): Promise<string> {
         return chunks.join("\n\n");
       };
 
-      // Split metas across instances
-      const chunkSize = Math.ceil(metas.length / numInstances);
+      // Split metas across accounts
+      const chunkSize = Math.ceil(metas.length / numAccounts);
       const chunks: ParaphraseParagraphMeta[][] = [];
-      for (let i = 0; i < numInstances; i++) {
+      for (let i = 0; i < numAccounts; i++) {
         const start = i * chunkSize;
         const end = Math.min(start + chunkSize, metas.length);
         chunks.push(metas.slice(start, end));
       }
 
-      // Log distribution
+      // Build batch request payload
+      const batchPayload: Record<string, string> = { mode: "dual" };
+      const usedAccounts: AccountKey[] = [];
+
       chunks.forEach((chunk, idx) => {
-        console.log(`Instance ${idx + 1} (${serviceUrls[idx]}): ${chunk.length} paragraphs`);
-      });
-
-      // Send all requests in parallel
-      console.log("Sending parallel requests to services...");
-      const responses = await Promise.all(
-        chunks.map((chunk, idx) =>
-          fetch(serviceUrls[idx], {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ text: buildPayload(chunk), freeze: [PARAPHRASE_DELIMITER] }),
-          })
-        )
-      );
-
-      // Check all responses
-      responses.forEach((response, idx) => {
-        if (!response.ok) {
-          throw new Error(`API request to ${serviceUrls[idx]} failed with status ${response.status}`);
+        if (chunk.length > 0) {
+          const accountKey = ACCOUNT_KEYS[idx];
+          batchPayload[accountKey] = buildPayload(chunk);
+          usedAccounts.push(accountKey);
+          console.log(`Account ${accountKey}: ${chunk.length} paragraphs`);
         }
       });
 
-      console.log("All responses received, parsing...");
+      // Send single batch request
+      console.log("Sending batch request to service...");
+      const response = await fetch(BATCH_API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(batchPayload),
+      });
 
-      const allData = await Promise.all(responses.map((r) => r.json()));
-      const paraphrasedChunks = allData.map((data) => data.secondMode);
+      if (!response.ok) {
+        throw new Error(`Batch API request failed with status ${response.status}`);
+      }
 
-      if (paraphrasedChunks.some((chunk) => !chunk)) {
-        throw new Error("Invalid response from paraphrase API");
+      console.log("Batch response received, parsing...");
+      const data: BatchApiResponse = await response.json();
+
+      // Collect warnings from response
+      const batchWarnings = collectBatchWarnings(data, usedAccounts);
+      allWarnings.push(...batchWarnings);
+
+      // Extract paraphrased text from each account (using secondMode for dual mode)
+      const paraphrasedChunks: string[] = [];
+      for (const key of usedAccounts) {
+        const result = data[key];
+        if (!result) {
+          throw new Error(`No response received for account ${key}`);
+        }
+        // For dual mode, we use secondMode (the shortened version after Simple + Shorten)
+        const paraphrasedText = result.secondMode;
+        if (!paraphrasedText) {
+          // If secondMode is missing but we have an error, it's a complete failure
+          if (result.error) {
+            throw new Error(`Account ${key} failed: ${result.error}`);
+          }
+          throw new Error(`No paraphrased text received from account ${key}`);
+        }
+        paraphrasedChunks.push(paraphrasedText);
       }
 
       // Parse all responses
@@ -930,15 +1059,15 @@ export async function paraphraseDocument(): Promise<string> {
 
       // Log received counts
       allParsedChunks.forEach((parsed, idx) => {
-        console.log(`Received ${parsed.length} parts from service ${idx + 1}`);
+        console.log(`Received ${parsed.length} parts from account ${usedAccounts[idx]}`);
       });
 
       // Validate counts
       allParsedChunks.forEach((parsed, idx) => {
         if (parsed.length !== chunks[idx].length) {
-          console.error(`Instance ${idx + 1} mismatch: sent ${chunks[idx].length}, received ${parsed.length}`);
+          console.error(`Account ${usedAccounts[idx]} mismatch: sent ${chunks[idx].length}, received ${parsed.length}`);
           throw new Error(
-            `Instance ${idx + 1} paraphrase count mismatch. Sent ${chunks[idx].length}, received ${parsed.length}. Aborting to prevent data loss.`
+            `Account ${usedAccounts[idx]} paraphrase count mismatch. Sent ${chunks[idx].length}, received ${parsed.length}. Aborting to prevent data loss.`
           );
         }
       });
@@ -974,8 +1103,12 @@ export async function paraphraseDocument(): Promise<string> {
       }
 
       await context.sync();
-      console.log(`Paraphrase complete. Updated ${updatedCount}/${metas.length} paragraphs using parallel processing.`);
-      return `Successfully paraphrased ${updatedCount} body paragraphs (parallel mode).`;
+      console.log(`Paraphrase complete. Updated ${updatedCount}/${metas.length} paragraphs using batch API.`);
+
+      return {
+        message: `Successfully paraphrased ${updatedCount} body paragraphs (batch mode).`,
+        warnings: allWarnings,
+      };
     });
   } catch (error) {
     console.error("Error in paraphraseDocument:", error);
@@ -984,11 +1117,20 @@ export async function paraphraseDocument(): Promise<string> {
 }
 
 /**
- * Paraphrase selected text using the local API (Simple + Short mode)
+ * Paraphrase selected text using the batch API (Simple + Short mode / dual mode)
  */
-export async function paraphraseSelectedText(): Promise<string> {
+export async function paraphraseSelectedText(): Promise<ParaphraseResult> {
   try {
     return await Word.run(async (context) => {
+      const allWarnings: string[] = [];
+
+      // Health check (non-blocking)
+      const healthResult = await checkServiceHealth();
+      if (healthResult.warnings.length > 0) {
+        console.warn("Health check warnings:", healthResult.warnings);
+        allWarnings.push(...healthResult.warnings);
+      }
+
       // Get the selected range
       const selection = context.document.getSelection();
       selection.load("text");
@@ -1001,23 +1143,37 @@ export async function paraphraseSelectedText(): Promise<string> {
         throw new Error("No text selected");
       }
 
-      // Call the paraphrase API
-      const response = await fetch("https://analizeai.com/paraphrase", {
+      // Call the batch paraphrase API with dual mode
+      const response = await fetch(BATCH_API_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ text: selectedText }),
+        body: JSON.stringify({ acc1: selectedText, mode: "dual" }),
       });
 
       if (!response.ok) {
-        throw new Error(`API request failed with status ${response.status}`);
+        throw new Error(`Batch API request failed with status ${response.status}`);
       }
 
-      const data = await response.json();
-      const paraphrasedText = data.secondMode;
+      const data: BatchApiResponse = await response.json();
+
+      // Collect warnings
+      const batchWarnings = collectBatchWarnings(data, ["acc1"]);
+      allWarnings.push(...batchWarnings);
+
+      const result = data.acc1;
+      if (!result) {
+        throw new Error("No response received from batch API");
+      }
+
+      // For dual mode, use secondMode (the shortened result)
+      const paraphrasedText = result.secondMode;
 
       if (!paraphrasedText) {
+        if (result.error) {
+          throw new Error(`Paraphrase failed: ${result.error}`);
+        }
         throw new Error("Invalid response from paraphrase API");
       }
 
@@ -1026,7 +1182,7 @@ export async function paraphraseSelectedText(): Promise<string> {
       selection.font.bold = false;
       await context.sync();
 
-      return "Text paraphrased successfully";
+      return { message: "Text paraphrased successfully", warnings: allWarnings };
     });
   } catch (error) {
     console.error("Error in paraphraseSelectedText:", error);
@@ -1035,11 +1191,20 @@ export async function paraphraseSelectedText(): Promise<string> {
 }
 
 /**
- * Paraphrase selected text using the Standard mode API
+ * Paraphrase selected text using the batch API (Standard mode)
  */
-export async function paraphraseSelectedTextStandard(): Promise<string> {
+export async function paraphraseSelectedTextStandard(): Promise<ParaphraseResult> {
   try {
     return await Word.run(async (context) => {
+      const allWarnings: string[] = [];
+
+      // Health check (non-blocking)
+      const healthResult = await checkServiceHealth();
+      if (healthResult.warnings.length > 0) {
+        console.warn("Health check warnings:", healthResult.warnings);
+        allWarnings.push(...healthResult.warnings);
+      }
+
       // Get the selected range
       const selection = context.document.getSelection();
       selection.load("text");
@@ -1052,23 +1217,37 @@ export async function paraphraseSelectedTextStandard(): Promise<string> {
         throw new Error("No text selected");
       }
 
-      // Call the paraphrase-standard API
-      const response = await fetch("https://analizeai.com/paraphrase-standard", {
+      // Call the batch paraphrase API with standard mode
+      const response = await fetch(BATCH_API_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ text: selectedText }),
+        body: JSON.stringify({ acc1: selectedText, mode: "standard" }),
       });
 
       if (!response.ok) {
-        throw new Error(`API request failed with status ${response.status}`);
+        throw new Error(`Batch API request failed with status ${response.status}`);
       }
 
-      const data = await response.json();
-      const paraphrasedText = data.output;
+      const data: BatchApiResponse = await response.json();
+
+      // Collect warnings
+      const batchWarnings = collectBatchWarnings(data, ["acc1"]);
+      allWarnings.push(...batchWarnings);
+
+      const result = data.acc1;
+      if (!result) {
+        throw new Error("No response received from batch API");
+      }
+
+      // For standard mode, use result field
+      const paraphrasedText = result.result;
 
       if (!paraphrasedText) {
+        if (result.error) {
+          throw new Error(`Paraphrase failed: ${result.error}`);
+        }
         throw new Error("Invalid response from paraphrase API");
       }
 
@@ -1077,7 +1256,7 @@ export async function paraphraseSelectedTextStandard(): Promise<string> {
       selection.font.bold = false;
       await context.sync();
 
-      return "Text paraphrased successfully";
+      return { message: "Text paraphrased successfully", warnings: allWarnings };
     });
   } catch (error) {
     console.error("Error in paraphraseSelectedTextStandard:", error);
@@ -1086,13 +1265,20 @@ export async function paraphraseSelectedTextStandard(): Promise<string> {
 }
 
 /**
- * Paraphrase all body paragraphs in the document using the Standard mode API
- * Uses parallel processing across two service instances for faster performance
+ * Paraphrase all body paragraphs in the document using the batch API (Standard mode)
  */
-export async function paraphraseDocumentStandard(): Promise<string> {
+export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
   try {
     return await Word.run(async (context) => {
-      console.log("Starting document paraphrase (Standard mode with parallel processing)...");
+      console.log("Starting document paraphrase (Standard mode with batch API)...");
+      const allWarnings: string[] = [];
+
+      // Health check (non-blocking)
+      const healthResult = await checkServiceHealth();
+      if (healthResult.warnings.length > 0) {
+        console.warn("Health check warnings:", healthResult.warnings);
+        allWarnings.push(...healthResult.warnings);
+      }
 
       const paragraphs = context.document.body.paragraphs;
       paragraphs.load("items/text, items/outlineLevel, items/uniqueLocalId");
@@ -1146,7 +1332,7 @@ export async function paraphraseDocumentStandard(): Promise<string> {
       }
 
       if (metas.length === 0) {
-        return "No body paragraphs found to paraphrase.";
+        return { message: "No body paragraphs found to paraphrase.", warnings: allWarnings };
       }
 
       console.log(`Found ${metas.length} body paragraphs to paraphrase.`);
@@ -1157,21 +1343,15 @@ export async function paraphraseDocumentStandard(): Promise<string> {
       }, 0);
       console.log(`Total word count: ${totalWords}`);
 
-      // Determine number of instances based on word count
-      let numInstances = 1;
+      // Determine number of accounts to use based on word count
+      let numAccounts = 1;
       if (totalWords > 1500) {
-        numInstances = 3;
+        numAccounts = 3;
       } else if (totalWords >= 500) {
-        numInstances = 2;
+        numAccounts = 2;
       }
 
-      const serviceUrls = [
-        "https://analizeai.com/paraphrase-standard",
-        "https://v2.analizeai.com/paraphrase-standard",
-        "https://v3.analizeai.com/paraphrase-standard",
-      ];
-
-      console.log(`Using ${numInstances} instance(s) for processing`);
+      console.log(`Using ${numAccounts} account(s) for processing via batch API`);
 
       // Build payloads helper
       const buildPayload = (metaArray: ParaphraseParagraphMeta[]) => {
@@ -1183,48 +1363,66 @@ export async function paraphraseDocumentStandard(): Promise<string> {
         return chunks.join("\n\n");
       };
 
-      // Split metas across instances
-      const chunkSize = Math.ceil(metas.length / numInstances);
+      // Split metas across accounts
+      const chunkSize = Math.ceil(metas.length / numAccounts);
       const chunks: ParaphraseParagraphMeta[][] = [];
-      for (let i = 0; i < numInstances; i++) {
+      for (let i = 0; i < numAccounts; i++) {
         const start = i * chunkSize;
         const end = Math.min(start + chunkSize, metas.length);
         chunks.push(metas.slice(start, end));
       }
 
-      // Log distribution
+      // Build batch request payload
+      const batchPayload: Record<string, string> = { mode: "standard" };
+      const usedAccounts: AccountKey[] = [];
+
       chunks.forEach((chunk, idx) => {
-        console.log(`Instance ${idx + 1} (${serviceUrls[idx]}): ${chunk.length} paragraphs`);
-      });
-
-      // Send all requests in parallel
-      console.log("Sending parallel requests to services...");
-      const responses = await Promise.all(
-        chunks.map((chunk, idx) =>
-          fetch(serviceUrls[idx], {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ text: buildPayload(chunk), freeze: [PARAPHRASE_DELIMITER] }),
-          })
-        )
-      );
-
-      // Check all responses
-      responses.forEach((response, idx) => {
-        if (!response.ok) {
-          throw new Error(`API request to ${serviceUrls[idx]} failed with status ${response.status}`);
+        if (chunk.length > 0) {
+          const accountKey = ACCOUNT_KEYS[idx];
+          batchPayload[accountKey] = buildPayload(chunk);
+          usedAccounts.push(accountKey);
+          console.log(`Account ${accountKey}: ${chunk.length} paragraphs`);
         }
       });
 
-      console.log("All responses received, parsing...");
+      // Send single batch request
+      console.log("Sending batch request to service...");
+      const response = await fetch(BATCH_API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(batchPayload),
+      });
 
-      const allData = await Promise.all(responses.map((r) => r.json()));
-      const paraphrasedChunks = allData.map((data) => data.output);
+      if (!response.ok) {
+        throw new Error(`Batch API request failed with status ${response.status}`);
+      }
 
-      if (paraphrasedChunks.some((chunk) => !chunk)) {
-        throw new Error("Invalid response from paraphrase API");
+      console.log("Batch response received, parsing...");
+      const data: BatchApiResponse = await response.json();
+
+      // Collect warnings from response
+      const batchWarnings = collectBatchWarnings(data, usedAccounts);
+      allWarnings.push(...batchWarnings);
+
+      // Extract paraphrased text from each account (using result for standard mode)
+      const paraphrasedChunks: string[] = [];
+      for (const key of usedAccounts) {
+        const accountResult = data[key];
+        if (!accountResult) {
+          throw new Error(`No response received for account ${key}`);
+        }
+        // For standard mode, we use result field
+        const paraphrasedText = accountResult.result;
+        if (!paraphrasedText) {
+          // If result is missing but we have an error, it's a complete failure
+          if (accountResult.error) {
+            throw new Error(`Account ${key} failed: ${accountResult.error}`);
+          }
+          throw new Error(`No paraphrased text received from account ${key}`);
+        }
+        paraphrasedChunks.push(paraphrasedText);
       }
 
       // Parse all responses
@@ -1239,15 +1437,15 @@ export async function paraphraseDocumentStandard(): Promise<string> {
 
       // Log received counts
       allParsedChunks.forEach((parsed, idx) => {
-        console.log(`Received ${parsed.length} parts from service ${idx + 1}`);
+        console.log(`Received ${parsed.length} parts from account ${usedAccounts[idx]}`);
       });
 
       // Validate counts
       allParsedChunks.forEach((parsed, idx) => {
         if (parsed.length !== chunks[idx].length) {
-          console.error(`Instance ${idx + 1} mismatch: sent ${chunks[idx].length}, received ${parsed.length}`);
+          console.error(`Account ${usedAccounts[idx]} mismatch: sent ${chunks[idx].length}, received ${parsed.length}`);
           throw new Error(
-            `Instance ${idx + 1} paraphrase count mismatch. Sent ${chunks[idx].length}, received ${parsed.length}. Aborting to prevent data loss.`
+            `Account ${usedAccounts[idx]} paraphrase count mismatch. Sent ${chunks[idx].length}, received ${parsed.length}. Aborting to prevent data loss.`
           );
         }
       });
@@ -1283,8 +1481,12 @@ export async function paraphraseDocumentStandard(): Promise<string> {
       }
 
       await context.sync();
-      console.log(`Paraphrase complete. Updated ${updatedCount}/${metas.length} paragraphs using parallel processing.`);
-      return `Successfully paraphrased ${updatedCount} body paragraphs (parallel mode).`;
+      console.log(`Paraphrase complete. Updated ${updatedCount}/${metas.length} paragraphs using batch API.`);
+
+      return {
+        message: `Successfully paraphrased ${updatedCount} body paragraphs (batch mode).`,
+        warnings: allWarnings,
+      };
     });
   } catch (error) {
     console.error("Error in paraphraseDocumentStandard:", error);

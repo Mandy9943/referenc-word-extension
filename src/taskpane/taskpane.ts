@@ -18,10 +18,14 @@ import {
   normalizeBodyBold as normalizeBodyBoldInWord,
   paraphraseDocument as paraphraseDocumentInWord,
   paraphraseDocumentStandard as paraphraseDocumentStandardInWord,
+  ParaphraseResult,
   removeLinks as removeLinksInWord,
   removeReferences as removeReferencesInWord,
   removeWeirdNumbers as removeWeirdNumbersInWord,
 } from "./word";
+
+// Re-export the ParaphraseResult type for use in components
+export type { ParaphraseResult };
 
 /* global Office */
 
@@ -101,25 +105,31 @@ export async function removeWeirdNumbers() {
   }
 }
 
-export async function paraphraseSelectedText() {
+export async function paraphraseSelectedText(): Promise<ParaphraseResult> {
   await Office.onReady();
   switch (Office.context.host) {
     case Office.HostType.Word:
       return await paraphraseDocumentInWord();
-    case Office.HostType.PowerPoint:
-      return await paraphraseDocumentInPowerPoint();
+    case Office.HostType.PowerPoint: {
+      // PowerPoint still returns string, wrap it
+      const ppResult = await paraphraseDocumentInPowerPoint();
+      return { message: ppResult, warnings: [] };
+    }
     default:
       throw new Error("This function is only available in Word and PowerPoint");
   }
 }
 
-export async function paraphraseSelectedTextStandard() {
+export async function paraphraseSelectedTextStandard(): Promise<ParaphraseResult> {
   await Office.onReady();
   switch (Office.context.host) {
     case Office.HostType.Word:
       return await paraphraseDocumentStandardInWord();
-    case Office.HostType.PowerPoint:
-      return await paraphraseDocumentStandard();
+    case Office.HostType.PowerPoint: {
+      // PowerPoint still returns string, wrap it
+      const ppResult = await paraphraseDocumentStandard();
+      return { message: ppResult, warnings: [] };
+    }
     default:
       throw new Error("This function is only available in Word");
   }
