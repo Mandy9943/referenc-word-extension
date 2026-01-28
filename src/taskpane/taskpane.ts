@@ -111,9 +111,7 @@ export async function paraphraseSelectedText(): Promise<ParaphraseResult> {
     case Office.HostType.Word:
       return await paraphraseDocumentInWord();
     case Office.HostType.PowerPoint: {
-      // PowerPoint still returns string, wrap it
-      const ppResult = await paraphraseDocumentInPowerPoint();
-      return { message: ppResult, warnings: [] };
+      return await paraphraseDocumentInPowerPoint();
     }
     default:
       throw new Error("This function is only available in Word and PowerPoint");
@@ -126,9 +124,7 @@ export async function paraphraseSelectedTextStandard(): Promise<ParaphraseResult
     case Office.HostType.Word:
       return await paraphraseDocumentStandardInWord();
     case Office.HostType.PowerPoint: {
-      // PowerPoint still returns string, wrap it
-      const ppResult = await paraphraseDocumentStandard();
-      return { message: ppResult, warnings: [] };
+      return await paraphraseDocumentStandard();
     }
     default:
       throw new Error("This function is only available in Word");
