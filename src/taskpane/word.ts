@@ -142,6 +142,12 @@ const RESEARCH_QUESTION_HEADERS = [
   new RegExp(`^\\s*${NUMBERING_PREFIX}research\\s+question\\s+\\d+\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
 ];
 
+const TOC_HEADERS = [
+  new RegExp(`^\\s*${NUMBERING_PREFIX}table\\s+of\\s+contents?\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*${NUMBERING_PREFIX}contents?\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+  new RegExp(`^\\s*${NUMBERING_PREFIX}toc\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
+];
+
 type ParagraphMeta = {
   index: number;
   text: string;
@@ -214,9 +220,68 @@ function isHeadingOrTitle(meta: ParagraphMeta): boolean {
 function looksLikeTOC(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
+  // Match dot leaders with page numbers (5+ dots followed by number)
   const dotLeaderWithPage = /\.{5,}.*\d+\s*$/.test(trimmed);
+  // Match dot leaders with fewer dots (3+) followed by page number
+  const shortDotLeader = /\.{3,}\s*\d+\s*$/.test(trimmed);
+  // Match tabs (common in TOC entries)
   const hasTab = /\t/.test(trimmed);
-  return dotLeaderWithPage || hasTab;
+  // Match patterns like "Chapter 1 ..... 15" or "Introduction ... 2"
+  const spacedDotLeader = /\s+\.{2,}\s*\d+\s*$/.test(trimmed);
+  return dotLeaderWithPage || shortDotLeader || hasTab || spacedDotLeader;
+}
+
+/**
+ * Find the TOC section range in the document.
+ * Returns the start and end paragraph indexes of the TOC section.
+ */
+function findTOCSectionRange(metas: ParagraphMeta[]): { startIndex: number; endIndex: number } {
+  let startIndex = -1;
+
+  // Find TOC header
+  for (let i = 0; i < metas.length; i++) {
+    if (TOC_HEADERS.some((regex) => regex.test(metas[i].text))) {
+      startIndex = i;
+      break;
+    }
+  }
+
+  if (startIndex === -1) {
+    return { startIndex: -1, endIndex: -1 };
+  }
+
+  // Find end of TOC section - look for the last consecutive TOC-like entry
+  // or stop at the next major heading
+  let endIndex = startIndex;
+
+  for (let i = startIndex + 1; i < metas.length; i++) {
+    const meta = metas[i];
+    const text = meta.text;
+
+    // If it looks like a TOC entry, extend the end index
+    if (looksLikeTOC(text)) {
+      endIndex = i;
+      continue;
+    }
+
+    // Empty paragraphs within TOC are OK
+    if (!text) {
+      continue;
+    }
+
+    // If we hit a heading that's not a TOC header, we've found the end
+    if (isHeadingOrTitle(meta) && !TOC_HEADERS.some((regex) => regex.test(text))) {
+      break;
+    }
+
+    // If we've gone more than 3 paragraphs without a TOC-like entry, stop
+    if (i - endIndex > 3) {
+      break;
+    }
+  }
+
+  console.log(`TOC Section detected: start=${startIndex}, end=${endIndex}`);
+  return { startIndex, endIndex };
 }
 
 function findReferenceStartIndex(metas: ParagraphMeta[]): number {
@@ -627,10 +692,15 @@ export async function removeReferences(): Promise<string> {
       console.log("Starting reference removal process...");
 
       const paragraphs = context.document.body.paragraphs;
-      paragraphs.load("text");
+      paragraphs.load("text,style,styleBuiltIn,alignment");
       await context.sync();
 
       console.log(`Found ${paragraphs.items.length} paragraphs to process`);
+
+      // Build paragraph metadata and find TOC section to skip
+      const metas = buildParagraphMeta(paragraphs);
+      const tocRange = findTOCSectionRange(metas);
+      console.log(`TOC section range: ${tocRange.startIndex} to ${tocRange.endIndex}`);
 
       // Updated citation patterns to be more precise
       const citationPatterns = [
@@ -653,6 +723,20 @@ export async function removeReferences(): Promise<string> {
 
       // Process each paragraph
       for (let i = 0; i < paragraphs.items.length; i++) {
+        const meta = metas[i];
+
+        // Skip TOC section paragraphs
+        if (tocRange.startIndex !== -1 && i >= tocRange.startIndex && i <= tocRange.endIndex) {
+          console.log(`Skipping TOC paragraph ${i + 1}`);
+          continue;
+        }
+
+        // Skip individual TOC-like entries (fallback for entries outside detected TOC section)
+        if (looksLikeTOC(meta.text)) {
+          console.log(`Skipping TOC-like entry at paragraph ${i + 1}`);
+          continue;
+        }
+
         const paragraph = paragraphs.items[i];
         let text = paragraph.text;
         let hadMatch = false;
@@ -705,8 +789,13 @@ export async function removeLinks(deleteAll: boolean = false): Promise<string> {
       console.log("Starting link removal process...");
 
       const paragraphs = context.document.body.paragraphs;
-      paragraphs.load("text");
+      paragraphs.load("text,style,styleBuiltIn,alignment");
       await context.sync();
+
+      // Build paragraph metadata and find TOC section to skip
+      const metas = buildParagraphMeta(paragraphs);
+      const tocRange = findTOCSectionRange(metas);
+      console.log(`TOC section range: ${tocRange.startIndex} to ${tocRange.endIndex}`);
 
       let paragraphsToProcess = paragraphs.items;
 
@@ -740,7 +829,27 @@ export async function removeLinks(deleteAll: boolean = false): Promise<string> {
       const urlRegex = /\b((https?:\/\/)?[\w.-]+(?:\.[\w.-]+)+)\b/g;
       let linksRemovedCount = 0;
 
-      for (const paragraph of paragraphsToProcess) {
+      for (let i = 0; i < paragraphsToProcess.length; i++) {
+        const paragraph = paragraphsToProcess[i];
+        const paragraphIndex = paragraphs.items.indexOf(paragraph);
+        const meta = metas[paragraphIndex];
+
+        // Skip TOC section paragraphs
+        if (
+          tocRange.startIndex !== -1 &&
+          paragraphIndex >= tocRange.startIndex &&
+          paragraphIndex <= tocRange.endIndex
+        ) {
+          console.log(`Skipping TOC paragraph ${paragraphIndex + 1}`);
+          continue;
+        }
+
+        // Skip individual TOC-like entries
+        if (looksLikeTOC(meta.text)) {
+          console.log(`Skipping TOC-like entry at paragraph ${paragraphIndex + 1}`);
+          continue;
+        }
+
         const originalText = paragraph.text;
         const matches = originalText.match(urlRegex);
 
@@ -779,14 +888,34 @@ export async function removeWeirdNumbers(): Promise<string> {
       console.log("Starting weird number removal process...");
 
       const paragraphs = context.document.body.paragraphs;
-      paragraphs.load("text");
+      paragraphs.load("text,style,styleBuiltIn,alignment");
       await context.sync();
+
+      // Build paragraph metadata and find TOC section to skip
+      const metas = buildParagraphMeta(paragraphs);
+      const tocRange = findTOCSectionRange(metas);
+      console.log(`TOC section range: ${tocRange.startIndex} to ${tocRange.endIndex}`);
 
       // Regex to find patterns like 【...】 or [...] with the specified format
       const weirdNumberPattern = /[【[]\d+.*?[†+t].*?[】\]]\S*/g;
       let totalRemoved = 0;
 
-      for (const paragraph of paragraphs.items) {
+      for (let i = 0; i < paragraphs.items.length; i++) {
+        const paragraph = paragraphs.items[i];
+        const meta = metas[i];
+
+        // Skip TOC section paragraphs
+        if (tocRange.startIndex !== -1 && i >= tocRange.startIndex && i <= tocRange.endIndex) {
+          console.log(`Skipping TOC paragraph ${i + 1}`);
+          continue;
+        }
+
+        // Skip individual TOC-like entries
+        if (looksLikeTOC(meta.text)) {
+          console.log(`Skipping TOC-like entry at paragraph ${i + 1}`);
+          continue;
+        }
+
         const originalText = paragraph.text;
         const matches = originalText.match(weirdNumberPattern);
 
@@ -822,11 +951,25 @@ export async function normalizeBodyBold(): Promise<string> {
       await context.sync();
 
       const metas = buildParagraphMeta(paragraphs);
+      const tocRange = findTOCSectionRange(metas);
+      console.log(`TOC section range: ${tocRange.startIndex} to ${tocRange.endIndex}`);
       let updatedCount = 0;
 
       for (const meta of metas) {
         if (!meta.text) continue;
         if (isHeadingOrTitle(meta)) continue;
+
+        // Skip TOC section paragraphs
+        if (tocRange.startIndex !== -1 && meta.index >= tocRange.startIndex && meta.index <= tocRange.endIndex) {
+          console.log(`Skipping TOC paragraph ${meta.index + 1}`);
+          continue;
+        }
+
+        // Skip individual TOC-like entries
+        if (looksLikeTOC(meta.text)) {
+          console.log(`Skipping TOC-like entry at paragraph ${meta.index + 1}`);
+          continue;
+        }
 
         const paragraph = paragraphs.items[meta.index];
         paragraph.font.bold = false;
