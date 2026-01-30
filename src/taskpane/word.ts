@@ -9,10 +9,20 @@ const ACCOUNT_KEYS = ["acc1", "acc2", "acc3"] as const;
 
 type AccountKey = (typeof ACCOUNT_KEYS)[number];
 
+// Metrics for tracking text changes during paraphrasing
+export interface ChangeMetrics {
+  originalWordCount: number;
+  newWordCount: number;
+  wordChangePercent: number;
+  originalPreview: string;
+  newPreview: string;
+}
+
 // Result type for paraphrase functions with warnings support
 export interface ParaphraseResult {
   message: string;
   warnings: string[];
+  metrics?: ChangeMetrics;
 }
 
 // Health check response type
@@ -1067,17 +1077,18 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
 
       console.log(`Found ${metas.length} body paragraphs to paraphrase.`);
 
-      // Calculate total word count
-      const totalWords = metas.reduce((sum, meta) => {
+      // Calculate total word count and capture original preview
+      const originalWordCount = metas.reduce((sum, meta) => {
         return sum + meta.text.split(/\s+/).filter(Boolean).length;
       }, 0);
-      console.log(`Total word count: ${totalWords}`);
+      const originalPreview = metas.length > 0 ? metas[0].text.substring(0, 50) + "..." : "";
+      console.log(`Total word count: ${originalWordCount}`);
 
       // Determine number of accounts to use based on word count
       let numAccounts = 1;
-      if (totalWords > 1500) {
+      if (originalWordCount > 1500) {
         numAccounts = 3;
-      } else if (totalWords >= 500) {
+      } else if (originalWordCount >= 500) {
         numAccounts = 2;
       }
 
@@ -1230,10 +1241,20 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
       });
 
       let updatedCount = 0;
+      let newWordCount = 0;
+      let newPreview = "";
       for (let i = 0; i < metas.length; i++) {
         const meta = metas[i];
         const newText = allParts[i];
         const p = paragraphById.get(meta.id);
+
+        // Track new word count
+        newWordCount += newText.split(/\s+/).filter(Boolean).length;
+
+        // Capture first paragraph as new preview
+        if (i === 0) {
+          newPreview = newText.substring(0, 50) + "...";
+        }
 
         if (p) {
           p.insertText(newText, Word.InsertLocation.replace);
@@ -1248,9 +1269,20 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
       await context.sync();
       console.log(`Paraphrase complete. Updated ${updatedCount}/${metas.length} paragraphs using batch API.`);
 
+      // Calculate change metrics
+      const wordChangePercent =
+        originalWordCount > 0 ? Math.round((Math.abs(originalWordCount - newWordCount) / originalWordCount) * 100) : 0;
+
       return {
         message: `Successfully paraphrased ${updatedCount} body paragraphs (batch mode).`,
         warnings: allWarnings,
+        metrics: {
+          originalWordCount,
+          newWordCount,
+          wordChangePercent,
+          originalPreview,
+          newPreview,
+        },
       };
     });
   } catch (error) {
@@ -1480,17 +1512,18 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
 
       console.log(`Found ${metas.length} body paragraphs to paraphrase.`);
 
-      // Calculate total word count
-      const totalWords = metas.reduce((sum, meta) => {
+      // Calculate total word count and capture original preview
+      const originalWordCount = metas.reduce((sum, meta) => {
         return sum + meta.text.split(/\s+/).filter(Boolean).length;
       }, 0);
-      console.log(`Total word count: ${totalWords}`);
+      const originalPreview = metas.length > 0 ? metas[0].text.substring(0, 50) + "..." : "";
+      console.log(`Total word count: ${originalWordCount}`);
 
       // Determine number of accounts to use based on word count
       let numAccounts = 1;
-      if (totalWords > 1500) {
+      if (originalWordCount > 1500) {
         numAccounts = 3;
-      } else if (totalWords >= 500) {
+      } else if (originalWordCount >= 500) {
         numAccounts = 2;
       }
 
@@ -1608,10 +1641,20 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
       });
 
       let updatedCount = 0;
+      let newWordCount = 0;
+      let newPreview = "";
       for (let i = 0; i < metas.length; i++) {
         const meta = metas[i];
         const newText = allParts[i];
         const p = paragraphById.get(meta.id);
+
+        // Track new word count
+        newWordCount += newText.split(/\s+/).filter(Boolean).length;
+
+        // Capture first paragraph as new preview
+        if (i === 0) {
+          newPreview = newText.substring(0, 50) + "...";
+        }
 
         if (p) {
           p.insertText(newText, Word.InsertLocation.replace);
@@ -1626,9 +1669,20 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
       await context.sync();
       console.log(`Paraphrase complete. Updated ${updatedCount}/${metas.length} paragraphs using batch API.`);
 
+      // Calculate change metrics
+      const wordChangePercent =
+        originalWordCount > 0 ? Math.round((Math.abs(originalWordCount - newWordCount) / originalWordCount) * 100) : 0;
+
       return {
         message: `Successfully paraphrased ${updatedCount} body paragraphs (batch mode).`,
         warnings: allWarnings,
+        metrics: {
+          originalWordCount,
+          newWordCount,
+          wordChangePercent,
+          originalPreview,
+          newPreview,
+        },
       };
     });
   } catch (error) {

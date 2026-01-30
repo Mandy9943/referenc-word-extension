@@ -878,20 +878,23 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
         return { message: "No eligible text found on current slide to paraphrase.", warnings: allWarnings };
       }
 
-      // Calculate total word count
-      const totalWords = eligibleShapes.reduce((sum, item) => {
+      // Calculate total word count and capture original preview
+      const originalWordCount = eligibleShapes.reduce((sum, item) => {
         return sum + item.text.split(/\s+/).filter(Boolean).length;
       }, 0);
+      const originalPreview = eligibleShapes.length > 0 ? eligibleShapes[0].text.substring(0, 50) + "..." : "";
 
       // Determine number of accounts to use based on word count
       let numAccounts = 1;
-      if (totalWords > 1500) {
+      if (originalWordCount > 1500) {
         numAccounts = 3;
-      } else if (totalWords >= 500) {
+      } else if (originalWordCount >= 500) {
         numAccounts = 2;
       }
 
-      console.log(`paraphraseDocument => totalWords=${totalWords}, using ${numAccounts} account(s) via batch API`);
+      console.log(
+        `paraphraseDocument => totalWords=${originalWordCount}, using ${numAccounts} account(s) via batch API`
+      );
 
       const buildPayload = (items: Array<{ text: string }>) => {
         const chunks: string[] = [];
@@ -1006,6 +1009,9 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
 
       // Apply paraphrased text to shapes
       let updatedCount = 0;
+      let newWordCount = 0;
+      let newPreview = "";
+      let isFirstShape = true;
       for (let chunkIndex = 0; chunkIndex < shapeChunks.length; chunkIndex++) {
         const shapesInChunk = shapeChunks[chunkIndex];
         const parts = parsedChunks[chunkIndex];
@@ -1013,6 +1019,15 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
         for (let i = 0; i < shapesInChunk.length; i++) {
           const item = shapesInChunk[i];
           const newText = parts[i];
+
+          // Track new word count
+          newWordCount += newText.split(/\s+/).filter(Boolean).length;
+
+          // Capture first shape as new preview
+          if (isFirstShape) {
+            newPreview = newText.substring(0, 50) + "...";
+            isFirstShape = false;
+          }
 
           try {
             console.log(`paraphraseDocument => updating shape ${item.shapeIndex}...`);
@@ -1032,9 +1047,20 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
         }
       }
 
+      // Calculate change metrics
+      const wordChangePercent =
+        originalWordCount > 0 ? Math.round((Math.abs(originalWordCount - newWordCount) / originalWordCount) * 100) : 0;
+
       return {
         message: `Successfully paraphrased ${updatedCount} text box${updatedCount === 1 ? "" : "es"} on current slide.`,
         warnings: allWarnings,
+        metrics: {
+          originalWordCount,
+          newWordCount,
+          wordChangePercent,
+          originalPreview,
+          newPreview,
+        },
       };
     });
   } catch (error) {
@@ -1105,20 +1131,21 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
         };
       }
 
-      // Calculate total word count
-      const totalWords = eligibleShapes.reduce((sum, item) => {
+      // Calculate total word count and capture original preview
+      const originalWordCount = eligibleShapes.reduce((sum, item) => {
         return sum + item.text.split(/\s+/).filter(Boolean).length;
       }, 0);
+      const originalPreview = eligibleShapes.length > 0 ? eligibleShapes[0].text.substring(0, 50) + "..." : "";
 
       let numAccounts = 1;
-      if (totalWords > 1500) {
+      if (originalWordCount > 1500) {
         numAccounts = 3;
-      } else if (totalWords >= 500) {
+      } else if (originalWordCount >= 500) {
         numAccounts = 2;
       }
 
       console.log(
-        `paraphraseDocumentStandard => totalWords=${totalWords}, using ${numAccounts} account(s) via batch API`
+        `paraphraseDocumentStandard => totalWords=${originalWordCount}, using ${numAccounts} account(s) via batch API`
       );
 
       const buildPayload = (items: Array<{ text: string }>) => {
@@ -1233,6 +1260,9 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
 
       // Apply paraphrased text to shapes
       let updatedCount = 0;
+      let newWordCount = 0;
+      let newPreview = "";
+      let isFirstShape = true;
       for (let chunkIndex = 0; chunkIndex < shapeChunks.length; chunkIndex++) {
         const shapesInChunk = shapeChunks[chunkIndex];
         const parts = parsedChunks[chunkIndex];
@@ -1240,6 +1270,15 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
         for (let i = 0; i < shapesInChunk.length; i++) {
           const item = shapesInChunk[i];
           const newText = parts[i];
+
+          // Track new word count
+          newWordCount += newText.split(/\s+/).filter(Boolean).length;
+
+          // Capture first shape as new preview
+          if (isFirstShape) {
+            newPreview = newText.substring(0, 50) + "...";
+            isFirstShape = false;
+          }
 
           try {
             item.shape.textFrame.textRange.text = newText;
@@ -1256,9 +1295,20 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
         }
       }
 
+      // Calculate change metrics
+      const wordChangePercent =
+        originalWordCount > 0 ? Math.round((Math.abs(originalWordCount - newWordCount) / originalWordCount) * 100) : 0;
+
       return {
         message: `Successfully paraphrased ${updatedCount} text box${updatedCount === 1 ? "" : "es"} on current slide (Standard mode).`,
         warnings: allWarnings,
+        metrics: {
+          originalWordCount,
+          newWordCount,
+          wordChangePercent,
+          originalPreview,
+          newPreview,
+        },
       };
     });
   } catch (error) {

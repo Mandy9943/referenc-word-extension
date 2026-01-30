@@ -4,6 +4,7 @@ import { Timer24Regular } from "@fluentui/react-icons";
 import * as React from "react";
 import {
   analyzeDocument,
+  ChangeMetrics,
   normalizeBoldText,
   ParaphraseResult,
   paraphraseSelectedText,
@@ -102,6 +103,38 @@ const useStyles = makeStyles({
       backgroundColor: tokens.colorPaletteRedBackground1,
     },
   },
+  metricsContainer: {
+    width: "100%",
+    maxWidth: "300px",
+    padding: "12px",
+    borderRadius: "4px",
+    backgroundColor: tokens.colorNeutralBackground3,
+    marginTop: "8px",
+  },
+  metricsRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    marginBottom: "4px",
+  },
+  previewText: {
+    fontSize: "11px",
+    color: tokens.colorNeutralForeground3,
+    fontStyle: "italic",
+    marginTop: "4px",
+    wordBreak: "break-word" as const,
+  },
+  changeGood: {
+    color: tokens.colorPaletteGreenForeground1,
+    fontWeight: "600",
+  },
+  changeWarning: {
+    color: tokens.colorPaletteYellowForeground1,
+    fontWeight: "600",
+  },
+  changeDanger: {
+    color: tokens.colorPaletteRedForeground1,
+    fontWeight: "600",
+  },
 });
 
 type Status = "idle" | "loading" | "success" | "error";
@@ -119,6 +152,7 @@ const App: React.FC = () => {
   const [failedAccount, setFailedAccount] = React.useState<FailedAccount | null>(null);
   const [warnings, setWarnings] = React.useState<string[]>([]);
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
+  const [changeMetrics, setChangeMetrics] = React.useState<ChangeMetrics | null>(null);
   const timerRef = React.useRef<any>(null);
 
   React.useEffect(() => {
@@ -163,6 +197,7 @@ const App: React.FC = () => {
     setFailedAccount(null);
     setWarnings([]);
     setErrorMessage(null);
+    setChangeMetrics(null);
     const startTime = Date.now();
 
     if (timerRef.current) clearInterval(timerRef.current);
@@ -177,6 +212,9 @@ const App: React.FC = () => {
       setFailedAccount(null);
       if (result.warnings && result.warnings.length > 0) {
         setWarnings(result.warnings);
+      }
+      if (result.metrics) {
+        setChangeMetrics(result.metrics);
       }
     } catch (error) {
       setStatus("error");
@@ -202,6 +240,7 @@ const App: React.FC = () => {
     setFailedAccount(null);
     setWarnings([]);
     setErrorMessage(null);
+    setChangeMetrics(null);
     const startTime = Date.now();
 
     if (timerRef.current) clearInterval(timerRef.current);
@@ -216,6 +255,9 @@ const App: React.FC = () => {
       setFailedAccount(null);
       if (result.warnings && result.warnings.length > 0) {
         setWarnings(result.warnings);
+      }
+      if (result.metrics) {
+        setChangeMetrics(result.metrics);
       }
     } catch (error) {
       setStatus("error");
@@ -262,6 +304,19 @@ const App: React.FC = () => {
     }
   };
 
+  // Helper to get change level styling
+  const getChangeClass = (percent: number) => {
+    if (percent >= 30) return styles.changeGood;
+    if (percent >= 20) return styles.changeWarning;
+    return styles.changeDanger;
+  };
+
+  const getChangeWarning = (percent: number) => {
+    if (percent < 20) return "⚠️ Low change - may be flagged as AI";
+    if (percent < 30) return "⚡ Moderate change - review recommended";
+    return "✅ Good change level";
+  };
+
   const getStatusDisplay = () => {
     const baseClassName = `${styles.status} `;
     switch (status) {
@@ -277,6 +332,48 @@ const App: React.FC = () => {
             <div className={baseClassName + styles.statusSuccess}>
               <Text>Operation completed successfully!</Text>
             </div>
+            {changeMetrics && (
+              <div className={styles.metricsContainer}>
+                <Text weight="semibold" size={300}>
+                  📊 Change Metrics
+                </Text>
+                <div className={styles.metricsRow} style={{ marginTop: "8px" }}>
+                  <Text size={200}>Words Before:</Text>
+                  <Text size={200} weight="semibold">
+                    {changeMetrics.originalWordCount}
+                  </Text>
+                </div>
+                <div className={styles.metricsRow}>
+                  <Text size={200}>Words After:</Text>
+                  <Text size={200} weight="semibold">
+                    {changeMetrics.newWordCount}
+                  </Text>
+                </div>
+                <div className={styles.metricsRow}>
+                  <Text size={200}>Word Change:</Text>
+                  <Text size={200} className={getChangeClass(changeMetrics.wordChangePercent)}>
+                    {changeMetrics.wordChangePercent}%
+                  </Text>
+                </div>
+                <div style={{ marginTop: "8px", textAlign: "center" }}>
+                  <Text size={200} className={getChangeClass(changeMetrics.wordChangePercent)}>
+                    {getChangeWarning(changeMetrics.wordChangePercent)}
+                  </Text>
+                </div>
+                <div style={{ marginTop: "8px" }}>
+                  <Text size={200} weight="semibold">
+                    Before:
+                  </Text>
+                  <div className={styles.previewText}>"{changeMetrics.originalPreview}"</div>
+                </div>
+                <div style={{ marginTop: "4px" }}>
+                  <Text size={200} weight="semibold">
+                    After:
+                  </Text>
+                  <div className={styles.previewText}>"{changeMetrics.newPreview}"</div>
+                </div>
+              </div>
+            )}
             {warnings.length > 0 && (
               <div className={baseClassName + styles.statusWarning}>
                 <Text weight="semibold">Warnings:</Text>

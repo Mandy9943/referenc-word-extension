@@ -14,6 +14,7 @@ import {
 import { insertText as insertTextInProject } from "./project";
 import {
   analyzeDocument as analyzeDocumentInWord,
+  ChangeMetrics,
   insertText as insertTextInWord,
   normalizeBodyBold as normalizeBodyBoldInWord,
   paraphraseDocument as paraphraseDocumentInWord,
@@ -24,8 +25,8 @@ import {
   removeWeirdNumbers as removeWeirdNumbersInWord,
 } from "./word";
 
-// Re-export the ParaphraseResult type for use in components
-export type { ParaphraseResult };
+// Re-export the types for use in components
+export type { ChangeMetrics, ParaphraseResult };
 
 /* global Office */
 
