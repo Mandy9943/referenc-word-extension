@@ -208,6 +208,107 @@ const TOC_HEADERS = [
   new RegExp(`^\\s*${NUMBERING_PREFIX}toc\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
 ];
 
+// Common academic section names (case-insensitive) for subtitle detection
+const COMMON_SECTION_NAMES = new Set([
+  // English
+  "introduction",
+  "methodology",
+  "methods",
+  "materials a nd methods",
+  "findings",
+  "analysis",
+  "data analysis",
+  "conclusions",
+  "recommendations",
+  "implications",
+  "limitations",
+  "future work",
+  "related work",
+  "hypothesis",
+  "research questions",
+  "research question",
+  "aims and objectives",
+  "goals",
+  "dedication",
+  "appendices",
+  "references",
+  "bibliography",
+  "glossary",
+  "abbreviations",
+  "definitions",
+  "executive summary",
+  "preface",
+  "foreword",
+  "case study",
+  "case studies",
+  "examples",
+  "assessment",
+  "review",
+  "implementation",
+  "architecture",
+  "framework",
+  "experimental setup",
+  "experimental results",
+  "procedure",
+  "procedures",
+  "approach",
+  "scope",
+  "context",
+  "rationale",
+  "contribution",
+  "introducción",
+  "resumen",
+  "metodología",
+  "métodos",
+  "resultados",
+  "discusión",
+  "conclusión",
+  "conclusiones",
+  "referencias",
+  "bibliografía",
+  "antecedentes",
+  "objetivos",
+  "análisis",
+  "recomendaciones",
+  // Portuguese
+  "introdução",
+  "resumo",
+  "metodologia",
+  "métodos",
+  "resultados",
+  "discussão",
+  "conclusão",
+  "conclusões",
+  "referências",
+  "bibliografia",
+  // French
+  "introduction",
+  "résumé",
+  "méthodologie",
+  "méthodes",
+  "résultats",
+  "discussion",
+  "conclusion",
+  "conclusions",
+  "références",
+  "bibliographie",
+]);
+
+// Pattern to detect numbered heading prefixes like "1.", "1.1", "2.1.3", "IV.", etc.
+const NUMBERED_HEADING_PREFIX = /^\s*(?:(?:\d+(?:\.\d+)*|[IVXivx]+)\.?\s*)/;
+
+/**
+ * Checks if a text (with numbering stripped) matches a known section name.
+ */
+function isKnownSectionName(text: string): boolean {
+  if (!text) return false;
+  // Strip any numbered prefix
+  const strippedText = text.replace(NUMBERED_HEADING_PREFIX, "").trim().toLowerCase();
+  // Remove trailing punctuation for comparison
+  const cleanText = strippedText.replace(/[-:;,.!?–—]+$/, "").trim();
+  return COMMON_SECTION_NAMES.has(cleanText);
+}
+
 type ParagraphMeta = {
   index: number;
   text: string;
@@ -248,6 +349,7 @@ function isHeadingOrTitle(meta: ParagraphMeta): boolean {
   const s = meta.style;
   const sb = meta.styleBuiltIn;
 
+  // Check Word styles first
   if (
     s.includes("heading") ||
     s.includes("title") ||
@@ -262,14 +364,53 @@ function isHeadingOrTitle(meta: ParagraphMeta): boolean {
   const text = meta.text;
   if (!text) return false;
 
-  const hasTerminalPunctuation = /[.!?]$/.test(text);
+  // Check if it's a known section name (handles "1.Introduction", "Introduction", etc.)
+  if (isKnownSectionName(text)) {
+    return true;
+  }
+
+  // Check if it matches any of the existing header patterns
+  const allHeaderPatterns = [
+    ...REFERENCE_HEADERS,
+    ...CONCLUSION_HEADERS,
+    ...AIM_OBJECTIVE_HEADERS,
+    ...RESEARCH_QUESTION_HEADERS,
+    ...TOC_HEADERS,
+  ];
+  if (allHeaderPatterns.some((pattern) => pattern.test(text))) {
+    return true;
+  }
+
+  // Check for numbered heading pattern: "1.", "1.1", "2.1.3", "IV." followed by text
+  const hasNumberedPrefix = NUMBERED_HEADING_PREFIX.test(text);
+  const textAfterNumber = text.replace(NUMBERED_HEADING_PREFIX, "").trim();
+
+  // For terminal punctuation check, ignore the numbering prefix ("1." is not terminal punctuation)
+  const hasTerminalPunctuation = /[.!?]$/.test(textAfterNumber);
   const isShortish = meta.wordCount > 0 && meta.wordCount <= 15;
   const isCentered = meta.alignment === "centered";
 
-  const words = text.split(/\s+/).filter(Boolean);
+  // Get words after stripping the numbered prefix for analysis
+  const words = textAfterNumber.split(/\s+/).filter(Boolean);
   const capitalised = words.filter((w) => /^[A-Z]/.test(w)).length;
-  const isTitleCase = words.length > 1 && capitalised / words.length > 0.6;
 
+  // Fix: Allow single-word titles (words.length >= 1 instead of > 1)
+  const isTitleCase = words.length >= 1 && capitalised / words.length > 0.6;
+
+  // Check for fully uppercase text (common for headings like "INTRODUCTION")
+  const isAllUppercase = textAfterNumber === textAfterNumber.toUpperCase() && /[A-Z]/.test(textAfterNumber);
+
+  // Numbered prefix with short text is likely a heading (e.g., "1.Introduction", "2.1 Methods")
+  if (hasNumberedPrefix && isShortish && !hasTerminalPunctuation) {
+    return true;
+  }
+
+  // All uppercase short text is likely a heading
+  if (isAllUppercase && isShortish && !hasTerminalPunctuation) {
+    return true;
+  }
+
+  // Original heuristic with fixed title-case detection
   if (!hasTerminalPunctuation && isShortish && (isCentered || isTitleCase)) {
     return true;
   }
@@ -797,6 +938,12 @@ export async function removeReferences(): Promise<string> {
           continue;
         }
 
+        // Skip headings and subtitles - they should never be modified by clean
+        if (isHeadingOrTitle(meta)) {
+          console.log(`Skipping heading/subtitle at paragraph ${i + 1}: ${meta.text}`);
+          continue;
+        }
+
         const paragraph = paragraphs.items[i];
         let text = paragraph.text;
         let hadMatch = false;
@@ -910,6 +1057,12 @@ export async function removeLinks(deleteAll: boolean = false): Promise<string> {
           continue;
         }
 
+        // Skip headings and subtitles - they should never be modified by clean
+        if (isHeadingOrTitle(meta)) {
+          console.log(`Skipping heading/subtitle at paragraph ${paragraphIndex + 1}: ${meta.text}`);
+          continue;
+        }
+
         const originalText = paragraph.text;
         const matches = originalText.match(urlRegex);
 
@@ -973,6 +1126,12 @@ export async function removeWeirdNumbers(): Promise<string> {
         // Skip individual TOC-like entries
         if (looksLikeTOC(meta.text)) {
           console.log(`Skipping TOC-like entry at paragraph ${i + 1}`);
+          continue;
+        }
+
+        // Skip headings and subtitles - they should never be modified by clean
+        if (isHeadingOrTitle(meta)) {
+          console.log(`Skipping heading/subtitle at paragraph ${i + 1}: ${meta.text}`);
           continue;
         }
 
