@@ -306,15 +306,16 @@ const App: React.FC = () => {
 
   // Helper to get change level styling
   const getChangeClass = (percent: number) => {
-    if (percent >= 30) return styles.changeGood;
-    if (percent >= 20) return styles.changeWarning;
+    if (percent >= 60) return styles.changeGood;
+    if (percent >= 40) return styles.changeWarning;
     return styles.changeDanger;
   };
 
   const getChangeWarning = (percent: number) => {
-    if (percent < 20) return "⚠️ Low change - may be flagged as AI";
-    if (percent < 30) return "⚡ Moderate change - review recommended";
-    return "✅ Good change level";
+    const reusedPercent = 100 - percent;
+    if (percent < 40) return `⚠️ Reusing ~${reusedPercent}% of original words`;
+    if (percent < 60) return `⚡ Reusing ~${reusedPercent}% of original words`;
+    return `✅ Only ~${reusedPercent}% of original words reused`;
   };
 
   const getStatusDisplay = () => {
@@ -350,9 +351,9 @@ const App: React.FC = () => {
                   </Text>
                 </div>
                 <div className={styles.metricsRow}>
-                  <Text size={200}>Word Change:</Text>
-                  <Text size={200} className={getChangeClass(changeMetrics.wordChangePercent)}>
-                    {changeMetrics.wordChangePercent}%
+                  <Text size={200}>Words Changed:</Text>
+                  <Text size={200} weight="semibold" className={getChangeClass(changeMetrics.wordChangePercent)}>
+                    {changeMetrics.wordsChanged} ({changeMetrics.wordChangePercent}%)
                   </Text>
                 </div>
                 <div style={{ marginTop: "8px", textAlign: "center" }}>

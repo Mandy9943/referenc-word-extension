@@ -3,6 +3,55 @@
 import { getFormattedReferences } from "./gemini";
 import type { ParaphraseResult } from "./word";
 
+/**
+ * Calculate the real percentage of words that changed between original and new text.
+ * Compares actual word content, not just counts.
+ */
+function calculateTextChangeMetrics(
+  originalTexts: string[],
+  newTexts: string[]
+): { wordsChanged: number; totalOriginalWords: number; totalNewWords: number; changePercent: number } {
+  // Combine all texts
+  const allOriginal = originalTexts.join(" ");
+  const allNew = newTexts.join(" ");
+
+  // Normalize and split into words
+  const normalizeWord = (word: string) => word.toLowerCase().replace(/[^\w\s]/g, "");
+  const originalWords = allOriginal.split(/\s+/).filter(Boolean).map(normalizeWord);
+  const newWords = allNew.split(/\s+/).filter(Boolean).map(normalizeWord);
+
+  // Create frequency maps for original words
+  const originalWordFreq = new Map<string, number>();
+  for (const word of originalWords) {
+    originalWordFreq.set(word, (originalWordFreq.get(word) || 0) + 1);
+  }
+
+  // Count words in new text that are NOT in original (or exceed original frequency)
+  const usedWordFreq = new Map<string, number>();
+  let wordsChanged = 0;
+
+  for (const word of newWords) {
+    const originalCount = originalWordFreq.get(word) || 0;
+    const usedCount = usedWordFreq.get(word) || 0;
+
+    if (usedCount >= originalCount) {
+      // This word is new or used more times than in original
+      wordsChanged++;
+    } else {
+      usedWordFreq.set(word, usedCount + 1);
+    }
+  }
+
+  const changePercent = newWords.length > 0 ? Math.round((wordsChanged / newWords.length) * 100) : 0;
+
+  return {
+    wordsChanged,
+    totalOriginalWords: originalWords.length,
+    totalNewWords: newWords.length,
+    changePercent,
+  };
+}
+
 // ==================== Batch API Configuration ====================
 const BATCH_API_URL = "https://analizeai.com/paraphrase-batch";
 const HEALTH_CHECK_URL = "https://analizeai.com/health";
@@ -1007,9 +1056,12 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
         }
       }
 
+      // Collect original and new texts for comparison
+      const originalTexts: string[] = [];
+      const newTexts: string[] = [];
+
       // Apply paraphrased text to shapes
       let updatedCount = 0;
-      let newWordCount = 0;
       let newPreview = "";
       let isFirstShape = true;
       for (let chunkIndex = 0; chunkIndex < shapeChunks.length; chunkIndex++) {
@@ -1020,8 +1072,9 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
           const item = shapesInChunk[i];
           const newText = parts[i];
 
-          // Track new word count
-          newWordCount += newText.split(/\s+/).filter(Boolean).length;
+          // Store texts for comparison
+          originalTexts.push(item.text);
+          newTexts.push(newText);
 
           // Capture first shape as new preview
           if (isFirstShape) {
@@ -1047,17 +1100,17 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
         }
       }
 
-      // Calculate change metrics
-      const wordChangePercent =
-        originalWordCount > 0 ? Math.round((Math.abs(originalWordCount - newWordCount) / originalWordCount) * 100) : 0;
+      // Calculate real change metrics by comparing actual words
+      const changeMetrics = calculateTextChangeMetrics(originalTexts, newTexts);
 
       return {
         message: `Successfully paraphrased ${updatedCount} text box${updatedCount === 1 ? "" : "es"} on current slide.`,
         warnings: allWarnings,
         metrics: {
-          originalWordCount,
-          newWordCount,
-          wordChangePercent,
+          originalWordCount: changeMetrics.totalOriginalWords,
+          newWordCount: changeMetrics.totalNewWords,
+          wordsChanged: changeMetrics.wordsChanged,
+          wordChangePercent: changeMetrics.changePercent,
           originalPreview,
           newPreview,
         },
@@ -1258,9 +1311,12 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
         }
       }
 
+      // Collect original and new texts for comparison
+      const originalTexts: string[] = [];
+      const newTexts: string[] = [];
+
       // Apply paraphrased text to shapes
       let updatedCount = 0;
-      let newWordCount = 0;
       let newPreview = "";
       let isFirstShape = true;
       for (let chunkIndex = 0; chunkIndex < shapeChunks.length; chunkIndex++) {
@@ -1271,8 +1327,9 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
           const item = shapesInChunk[i];
           const newText = parts[i];
 
-          // Track new word count
-          newWordCount += newText.split(/\s+/).filter(Boolean).length;
+          // Store texts for comparison
+          originalTexts.push(item.text);
+          newTexts.push(newText);
 
           // Capture first shape as new preview
           if (isFirstShape) {
@@ -1295,17 +1352,17 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
         }
       }
 
-      // Calculate change metrics
-      const wordChangePercent =
-        originalWordCount > 0 ? Math.round((Math.abs(originalWordCount - newWordCount) / originalWordCount) * 100) : 0;
+      // Calculate real change metrics by comparing actual words
+      const changeMetrics = calculateTextChangeMetrics(originalTexts, newTexts);
 
       return {
         message: `Successfully paraphrased ${updatedCount} text box${updatedCount === 1 ? "" : "es"} on current slide (Standard mode).`,
         warnings: allWarnings,
         metrics: {
-          originalWordCount,
-          newWordCount,
-          wordChangePercent,
+          originalWordCount: changeMetrics.totalOriginalWords,
+          newWordCount: changeMetrics.totalNewWords,
+          wordsChanged: changeMetrics.wordsChanged,
+          wordChangePercent: changeMetrics.changePercent,
           originalPreview,
           newPreview,
         },
