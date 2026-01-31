@@ -244,18 +244,26 @@ function buildParagraphMeta(paragraphs: Word.ParagraphCollection): ParagraphMeta
   });
 }
 
-function isHeadingOrTitle(meta: ParagraphMeta): boolean {
+function isHeadingOrTitle(meta: ParagraphMeta, debug: boolean = false): boolean {
   const s = meta.style;
   const sb = meta.styleBuiltIn;
 
-  if (
-    s.includes("heading") ||
+  // Only treat Heading 1, 2, 3 as actual headings (titles)
+  // Heading 4, 5, 6, etc. may contain body content in some documents
+  const isMainHeading =
+    /heading\s*[123]$/i.test(s) ||
+    /heading[123]$/i.test(sb) ||
     s.includes("title") ||
     s.includes("subtitle") ||
-    sb.includes("heading") ||
     sb.includes("title") ||
-    sb.includes("subtitle")
-  ) {
+    sb.includes("subtitle");
+
+  if (isMainHeading) {
+    if (debug) {
+      console.log(
+        `isHeadingOrTitle => main heading style: style="${s}", styleBuiltIn="${sb}", text="${meta.text.substring(0, 50)}..."`
+      );
+    }
     return true;
   }
 
@@ -271,6 +279,11 @@ function isHeadingOrTitle(meta: ParagraphMeta): boolean {
   const isTitleCase = words.length > 1 && capitalised / words.length > 0.6;
 
   if (!hasTerminalPunctuation && isShortish && (isCentered || isTitleCase)) {
+    if (debug) {
+      console.log(
+        `isHeadingOrTitle => heuristic match: centered=${isCentered}, titleCase=${isTitleCase}, text="${meta.text.substring(0, 50)}..."`
+      );
+    }
     return true;
   }
 
@@ -582,9 +595,11 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
       );
 
       // Filter out short paragraphs, TOC lines, and those ending with ":"
+      let debugSkipCounts = { reference: 0, excludedSection: 0, heading: 0, short: 0, toc: 0, endsColon: 0 };
       const eligibleIndexes = metas
         .filter((meta) => {
           if (referenceStartIndex !== -1 && meta.index >= referenceStartIndex) {
+            debugSkipCounts.reference++;
             return false;
           }
 
@@ -596,28 +611,37 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
           });
 
           if (insideExcludedSection) {
+            debugSkipCounts.excludedSection++;
             return false;
           }
 
-          if (isHeadingOrTitle(meta)) {
+          if (isHeadingOrTitle(meta, debugSkipCounts.heading < 5)) {
+            debugSkipCounts.heading++;
             return false;
           }
 
           if (meta.wordCount < 11) {
+            debugSkipCounts.short++;
             return false;
           }
 
           if (looksLikeTOC(meta.text)) {
+            debugSkipCounts.toc++;
             return false;
           }
 
           if (meta.text.trim().endsWith(":")) {
+            debugSkipCounts.endsColon++;
             return false;
           }
 
           return true;
         })
         .map((meta) => meta.index);
+
+      console.log("analyzeDocument => skip reasons", debugSkipCounts);
+
+      console.log("analyzeDocument => eligibleIndexes count (before first page filter)", eligibleIndexes.length);
 
       // Safety: remove first non-empty paragraph even if it passed filters
       const firstNonEmpty = metas.find((meta) => meta.text.length > 0);
