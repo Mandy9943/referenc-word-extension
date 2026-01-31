@@ -1106,6 +1106,14 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
           continue;
         }
 
+        // Skip main headings (outlineLevel 1, 2, 3 are Heading 1, 2, 3)
+        // Levels 4-9 and 10 (body) are allowed if they have enough words
+        const outlineLevel = typeof p.outlineLevel === "number" ? p.outlineLevel : Number(p.outlineLevel);
+        if (outlineLevel >= 1 && outlineLevel <= 3) {
+          console.log(`Skipping heading (outlineLevel: ${outlineLevel}): "${text.substring(0, 50)}..."`);
+          continue;
+        }
+
         // Paragraph has enough words to be considered body content
         console.log(
           `Including paragraph (${wordCount} words, outlineLevel: ${p.outlineLevel}): "${text.substring(0, 50)}..."`
@@ -1538,6 +1546,14 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
         const wordCount = text.split(/\s+/).filter(Boolean).length;
         if (wordCount < 15) {
           console.log(`Skipping short paragraph (${wordCount} words): "${text}"`);
+          continue;
+        }
+
+        // Skip main headings (outlineLevel 1, 2, 3 are Heading 1, 2, 3)
+        // Levels 4-9 and 10 (body) are allowed if they have enough words
+        const outlineLevel = typeof p.outlineLevel === "number" ? p.outlineLevel : Number(p.outlineLevel);
+        if (outlineLevel >= 1 && outlineLevel <= 3) {
+          console.log(`Skipping heading (outlineLevel: ${outlineLevel}): "${text.substring(0, 50)}..."`);
           continue;
         }
 
