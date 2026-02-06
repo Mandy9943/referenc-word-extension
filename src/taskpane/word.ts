@@ -1289,24 +1289,32 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
 
       const allParsedChunks = chunks.map((chunk, idx) => parseResponse(paraphrasedChunks[idx], chunk.length));
 
-      // Log received counts
+      // Log received counts and track mismatches
+      let totalMismatch = 0;
+      let mismatchDetails: string[] = [];
+
       allParsedChunks.forEach((parsed, idx) => {
         console.log(`Received ${parsed.length} parts from account ${usedAccounts[idx]}`);
-      });
-
-      // Validate counts
-      allParsedChunks.forEach((parsed, idx) => {
-        if (parsed.length !== chunks[idx].length) {
-          console.error(`Account ${usedAccounts[idx]} mismatch: sent ${chunks[idx].length}, received ${parsed.length}`);
-          throw new Error(
-            `Account ${usedAccounts[idx]} paraphrase count mismatch. Sent ${chunks[idx].length}, received ${parsed.length}. Aborting to prevent data loss.`
-          );
+        const sent = chunks[idx].length;
+        const received = parsed.length;
+        if (received !== sent) {
+          const diff = sent - received;
+          totalMismatch += diff;
+          mismatchDetails.push(`${usedAccounts[idx]}: sent ${sent}, received ${received}`);
+          console.warn(`Account ${usedAccounts[idx]} mismatch: sent ${sent}, received ${received} (${diff} missing)`);
         }
       });
 
+      // If there's a mismatch, add a warning but continue with what we received
+      if (totalMismatch > 0) {
+        const warningMsg = `Partial paraphrase: ${totalMismatch} paragraph(s) could not be processed and were left unchanged. Details: ${mismatchDetails.join("; ")}`;
+        console.warn(warningMsg);
+        allWarnings.push(warningMsg);
+      }
+
       // Combine results in order
       const allParts = allParsedChunks.flat();
-      console.log(`Combined total: ${allParts.length} paraphrased paragraphs`);
+      console.log(`Combined total: ${allParts.length} paraphrased paragraphs (expected ${metas.length})`);
 
       // Re-fetch paragraphs to ensure validity and apply changes
       const paragraphsToUpdate = context.document.body.paragraphs;
@@ -1323,39 +1331,67 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
       const newTexts: string[] = [];
 
       let updatedCount = 0;
+      let skippedCount = 0;
       let newPreview = "";
+      const skippedPreviews: string[] = [];
+
       for (let i = 0; i < metas.length; i++) {
         const meta = metas[i];
-        const newText = allParts[i];
         const p = paragraphById.get(meta.id);
 
-        // Store texts for comparison
-        originalTexts.push(meta.text);
-        newTexts.push(newText);
+        // Check if we have a paraphrased version for this paragraph
+        if (i < allParts.length) {
+          const newText = allParts[i];
 
-        // Capture first paragraph as new preview
-        if (i === 0) {
-          newPreview = newText.substring(0, 50) + "...";
-        }
+          // Store texts for comparison
+          originalTexts.push(meta.text);
+          newTexts.push(newText);
 
-        if (p) {
-          p.insertText(newText, Word.InsertLocation.replace);
-          p.font.bold = false;
-          updatedCount++;
-          console.log(`Updated paragraph ${i + 1}/${metas.length}`);
+          // Capture first paragraph as new preview
+          if (i === 0) {
+            newPreview = newText.substring(0, 50) + "...";
+          }
+
+          if (p) {
+            p.insertText(newText, Word.InsertLocation.replace);
+            p.font.bold = false;
+            updatedCount++;
+            console.log(`Updated paragraph ${i + 1}/${metas.length}`);
+          } else {
+            console.warn(`Could not find paragraph with ID ${meta.id}`);
+          }
         } else {
-          console.warn(`Could not find paragraph with ID ${meta.id}`);
+          // No paraphrased version available - leave paragraph unchanged
+          skippedCount++;
+          // Capture first 8 words of skipped paragraph for warning
+          const firstWords = meta.text.split(/\s+/).slice(0, 8).join(" ");
+          skippedPreviews.push(`"${firstWords}..."`);
+          console.log(`Skipped paragraph ${i + 1}/${metas.length} (no paraphrased version received): ${firstWords}`);
+          // Still include original in metrics for accurate comparison
+          originalTexts.push(meta.text);
+          newTexts.push(meta.text);
         }
       }
 
       await context.sync();
-      console.log(`Paraphrase complete. Updated ${updatedCount}/${metas.length} paragraphs using batch API.`);
+      console.log(
+        `Paraphrase complete. Updated ${updatedCount}/${metas.length} paragraphs, skipped ${skippedCount} using batch API.`
+      );
 
       // Calculate real change metrics by comparing actual words
       const changeMetrics = calculateTextChangeMetrics(originalTexts, newTexts);
 
+      // Build result message
+      let resultMessage = `Successfully paraphrased ${updatedCount} body paragraphs (batch mode).`;
+      if (skippedCount > 0) {
+        resultMessage = `Paraphrased ${updatedCount} of ${metas.length} paragraphs. ${skippedCount} paragraph(s) left unchanged due to processing limits.`;
+        // Add warning with previews of skipped paragraphs
+        const skippedWarning = `Unchanged paragraphs: ${skippedPreviews.join(", ")}`;
+        allWarnings.push(skippedWarning);
+      }
+
       return {
-        message: `Successfully paraphrased ${updatedCount} body paragraphs (batch mode).`,
+        message: resultMessage,
         warnings: allWarnings,
         metrics: {
           originalWordCount: changeMetrics.totalOriginalWords,
@@ -1697,24 +1733,32 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
 
       const allParsedChunks = paraphrasedChunks.map((chunk) => parseResponse(chunk));
 
-      // Log received counts
+      // Log received counts and track mismatches
+      let totalMismatch = 0;
+      let mismatchDetails: string[] = [];
+
       allParsedChunks.forEach((parsed, idx) => {
         console.log(`Received ${parsed.length} parts from account ${usedAccounts[idx]}`);
-      });
-
-      // Validate counts
-      allParsedChunks.forEach((parsed, idx) => {
-        if (parsed.length !== chunks[idx].length) {
-          console.error(`Account ${usedAccounts[idx]} mismatch: sent ${chunks[idx].length}, received ${parsed.length}`);
-          throw new Error(
-            `Account ${usedAccounts[idx]} paraphrase count mismatch. Sent ${chunks[idx].length}, received ${parsed.length}. Aborting to prevent data loss.`
-          );
+        const sent = chunks[idx].length;
+        const received = parsed.length;
+        if (received !== sent) {
+          const diff = sent - received;
+          totalMismatch += diff;
+          mismatchDetails.push(`${usedAccounts[idx]}: sent ${sent}, received ${received}`);
+          console.warn(`Account ${usedAccounts[idx]} mismatch: sent ${sent}, received ${received} (${diff} missing)`);
         }
       });
 
+      // If there's a mismatch, add a warning but continue with what we received
+      if (totalMismatch > 0) {
+        const warningMsg = `Partial paraphrase: ${totalMismatch} paragraph(s) could not be processed and were left unchanged. Details: ${mismatchDetails.join("; ")}`;
+        console.warn(warningMsg);
+        allWarnings.push(warningMsg);
+      }
+
       // Combine results in order
       const allParts = allParsedChunks.flat();
-      console.log(`Combined total: ${allParts.length} paraphrased paragraphs`);
+      console.log(`Combined total: ${allParts.length} paraphrased paragraphs (expected ${metas.length})`);
 
       // Re-fetch paragraphs to ensure validity and apply changes
       const paragraphsToUpdate = context.document.body.paragraphs;
@@ -1731,39 +1775,67 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
       const newTexts: string[] = [];
 
       let updatedCount = 0;
+      let skippedCount = 0;
       let newPreview = "";
+      const skippedPreviews: string[] = [];
+
       for (let i = 0; i < metas.length; i++) {
         const meta = metas[i];
-        const newText = allParts[i];
         const p = paragraphById.get(meta.id);
 
-        // Store texts for comparison
-        originalTexts.push(meta.text);
-        newTexts.push(newText);
+        // Check if we have a paraphrased version for this paragraph
+        if (i < allParts.length) {
+          const newText = allParts[i];
 
-        // Capture first paragraph as new preview
-        if (i === 0) {
-          newPreview = newText.substring(0, 50) + "...";
-        }
+          // Store texts for comparison
+          originalTexts.push(meta.text);
+          newTexts.push(newText);
 
-        if (p) {
-          p.insertText(newText, Word.InsertLocation.replace);
-          p.font.bold = false;
-          updatedCount++;
-          console.log(`Updated paragraph ${i + 1}/${metas.length}`);
+          // Capture first paragraph as new preview
+          if (i === 0) {
+            newPreview = newText.substring(0, 50) + "...";
+          }
+
+          if (p) {
+            p.insertText(newText, Word.InsertLocation.replace);
+            p.font.bold = false;
+            updatedCount++;
+            console.log(`Updated paragraph ${i + 1}/${metas.length}`);
+          } else {
+            console.warn(`Could not find paragraph with ID ${meta.id}`);
+          }
         } else {
-          console.warn(`Could not find paragraph with ID ${meta.id}`);
+          // No paraphrased version available - leave paragraph unchanged
+          skippedCount++;
+          // Capture first 8 words of skipped paragraph for warning
+          const firstWords = meta.text.split(/\s+/).slice(0, 8).join(" ");
+          skippedPreviews.push(`"${firstWords}..."`);
+          console.log(`Skipped paragraph ${i + 1}/${metas.length} (no paraphrased version received): ${firstWords}`);
+          // Still include original in metrics for accurate comparison
+          originalTexts.push(meta.text);
+          newTexts.push(meta.text);
         }
       }
 
       await context.sync();
-      console.log(`Paraphrase complete. Updated ${updatedCount}/${metas.length} paragraphs using batch API.`);
+      console.log(
+        `Paraphrase complete. Updated ${updatedCount}/${metas.length} paragraphs, skipped ${skippedCount} using batch API.`
+      );
 
       // Calculate real change metrics by comparing actual words
       const changeMetrics = calculateTextChangeMetrics(originalTexts, newTexts);
 
+      // Build result message
+      let resultMessage = `Successfully paraphrased ${updatedCount} body paragraphs (batch mode).`;
+      if (skippedCount > 0) {
+        resultMessage = `Paraphrased ${updatedCount} of ${metas.length} paragraphs. ${skippedCount} paragraph(s) left unchanged due to processing limits.`;
+        // Add warning with previews of skipped paragraphs
+        const skippedWarning = `Unchanged paragraphs: ${skippedPreviews.join(", ")}`;
+        allWarnings.push(skippedWarning);
+      }
+
       return {
-        message: `Successfully paraphrased ${updatedCount} body paragraphs (batch mode).`,
+        message: resultMessage,
         warnings: allWarnings,
         metrics: {
           originalWordCount: changeMetrics.totalOriginalWords,
