@@ -1,56 +1,8 @@
 /* eslint-disable office-addins/no-context-sync-in-loop */
 /* global PowerPoint console, Office, fetch, AbortController, setTimeout, clearTimeout */
+import { calculateTextChangeMetrics } from "./changeMetrics";
 import { getFormattedReferences } from "./gemini";
 import type { ParaphraseResult } from "./word";
-
-/**
- * Calculate the real percentage of words that changed between original and new text.
- * Compares actual word content, not just counts.
- */
-function calculateTextChangeMetrics(
-  originalTexts: string[],
-  newTexts: string[]
-): { wordsChanged: number; totalOriginalWords: number; totalNewWords: number; changePercent: number } {
-  // Combine all texts
-  const allOriginal = originalTexts.join(" ");
-  const allNew = newTexts.join(" ");
-
-  // Normalize and split into words
-  const normalizeWord = (word: string) => word.toLowerCase().replace(/[^\w\s]/g, "");
-  const originalWords = allOriginal.split(/\s+/).filter(Boolean).map(normalizeWord);
-  const newWords = allNew.split(/\s+/).filter(Boolean).map(normalizeWord);
-
-  // Create frequency maps for original words
-  const originalWordFreq = new Map<string, number>();
-  for (const word of originalWords) {
-    originalWordFreq.set(word, (originalWordFreq.get(word) || 0) + 1);
-  }
-
-  // Count words in new text that are NOT in original (or exceed original frequency)
-  const usedWordFreq = new Map<string, number>();
-  let wordsChanged = 0;
-
-  for (const word of newWords) {
-    const originalCount = originalWordFreq.get(word) || 0;
-    const usedCount = usedWordFreq.get(word) || 0;
-
-    if (usedCount >= originalCount) {
-      // This word is new or used more times than in original
-      wordsChanged++;
-    } else {
-      usedWordFreq.set(word, usedCount + 1);
-    }
-  }
-
-  const changePercent = newWords.length > 0 ? Math.round((wordsChanged / newWords.length) * 100) : 0;
-
-  return {
-    wordsChanged,
-    totalOriginalWords: originalWords.length,
-    totalNewWords: newWords.length,
-    changePercent,
-  };
-}
 
 // ==================== Batch API Configuration ====================
 const BATCH_API_URL = "https://analizeai.com/paraphrase-batch";
@@ -1111,6 +1063,9 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
           newWordCount: changeMetrics.totalNewWords,
           wordsChanged: changeMetrics.wordsChanged,
           wordChangePercent: changeMetrics.changePercent,
+          reusedWords: changeMetrics.reusedWords,
+          reusePercent: changeMetrics.reusePercent,
+          addedWords: changeMetrics.addedWords,
           originalPreview,
           newPreview,
         },
@@ -1363,6 +1318,9 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
           newWordCount: changeMetrics.totalNewWords,
           wordsChanged: changeMetrics.wordsChanged,
           wordChangePercent: changeMetrics.changePercent,
+          reusedWords: changeMetrics.reusedWords,
+          reusePercent: changeMetrics.reusePercent,
+          addedWords: changeMetrics.addedWords,
           originalPreview,
           newPreview,
         },

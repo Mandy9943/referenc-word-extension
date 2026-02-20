@@ -311,11 +311,14 @@ const App: React.FC = () => {
     return styles.changeDanger;
   };
 
-  const getChangeWarning = (percent: number) => {
-    const reusedPercent = 100 - percent;
-    if (percent < 40) return `⚠️ Reusing ~${reusedPercent}% of original words`;
-    if (percent < 60) return `⚡ Reusing ~${reusedPercent}% of original words`;
-    return `✅ Only ~${reusedPercent}% of original words reused`;
+  const getChangeWarning = (metrics: ChangeMetrics) => {
+    if (metrics.wordChangePercent < 40) {
+      return `⚠️ Low rewrite: ~${metrics.reusePercent}% of original words are still reused`;
+    }
+    if (metrics.wordChangePercent < 60) {
+      return `⚡ Moderate rewrite: ~${metrics.reusePercent}% of original words are still reused`;
+    }
+    return `✅ Strong rewrite: only ~${metrics.reusePercent}% of original words are reused`;
   };
 
   const getStatusDisplay = () => {
@@ -351,14 +354,26 @@ const App: React.FC = () => {
                   </Text>
                 </div>
                 <div className={styles.metricsRow}>
-                  <Text size={200}>Words Changed:</Text>
+                  <Text size={200}>Original Words Changed:</Text>
                   <Text size={200} weight="semibold" className={getChangeClass(changeMetrics.wordChangePercent)}>
                     {changeMetrics.wordsChanged} ({changeMetrics.wordChangePercent}%)
                   </Text>
                 </div>
+                <div className={styles.metricsRow}>
+                  <Text size={200}>Original Words Reused:</Text>
+                  <Text size={200} weight="semibold">
+                    {changeMetrics.reusedWords} ({changeMetrics.reusePercent}%)
+                  </Text>
+                </div>
+                <div className={styles.metricsRow}>
+                  <Text size={200}>New Words Added:</Text>
+                  <Text size={200} weight="semibold">
+                    {changeMetrics.addedWords}
+                  </Text>
+                </div>
                 <div style={{ marginTop: "8px", textAlign: "center" }}>
                   <Text size={200} className={getChangeClass(changeMetrics.wordChangePercent)}>
-                    {getChangeWarning(changeMetrics.wordChangePercent)}
+                    {getChangeWarning(changeMetrics)}
                   </Text>
                 </div>
                 <div style={{ marginTop: "8px" }}>
