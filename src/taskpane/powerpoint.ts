@@ -254,6 +254,85 @@ function shuffleInPlace<T>(array: T[]): T[] {
 const TEXT_CAPABLE_SHAPE_TYPES = new Set(["GeometricShape", "TextBox", "Placeholder", "SmartArt", "Group"]);
 const PARAPHRASE_DELIMITER = "qbpdelim123";
 
+type EligibleShape = {
+  shape: PowerPoint.Shape;
+  text: string;
+  shapeIndex: number;
+  slideIndex: number;
+};
+
+function countWords(text: string): number {
+  const sanitized = text.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+  if (!sanitized) {
+    return 0;
+  }
+  return sanitized.split(/\s+/).filter(Boolean).length;
+}
+
+function buildBatchPayloadText(items: Array<{ text: string }>): string {
+  const chunks: string[] = [];
+  for (const item of items) {
+    chunks.push(PARAPHRASE_DELIMITER);
+    chunks.push(item.text);
+  }
+  return chunks.join("\n\n");
+}
+
+function parseParaphraseParts(text: string, expectedCount: number): string[] {
+  let parts = text
+    .split(new RegExp(`${PARAPHRASE_DELIMITER}`, "i"))
+    .map((x: string) => x.trim())
+    .filter((x: string) => x.length > 0);
+
+  if (parts.length < expectedCount) {
+    console.warn(`Mismatch detected (Expected ${expectedCount}, got ${parts.length}). Attempting to recover merged parts...`);
+
+    const recoveredParts: string[] = [];
+    for (const part of parts) {
+      if (part.includes("\n\n")) {
+        const subParts = part
+          .split(/\n\n+/)
+          .map((p) => p.trim())
+          .filter((p) => p.length > 0);
+        recoveredParts.push(...subParts);
+      } else {
+        recoveredParts.push(part);
+      }
+    }
+
+    if (recoveredParts.length === expectedCount) {
+      console.log("Successfully recovered merged parts!");
+      return recoveredParts;
+    }
+    if (Math.abs(recoveredParts.length - expectedCount) < Math.abs(parts.length - expectedCount)) {
+      console.log(`Partial recovery: now have ${recoveredParts.length} parts.`);
+      return recoveredParts;
+    }
+  }
+
+  return parts;
+}
+
+function splitIntoAccountChunks<T>(items: T[], numAccounts: number): Array<{ accountKey: AccountKey; items: T[] }> {
+  const chunkSize = Math.ceil(items.length / numAccounts);
+  const chunks: Array<{ accountKey: AccountKey; items: T[] }> = [];
+
+  for (let i = 0; i < numAccounts; i++) {
+    const start = i * chunkSize;
+    const end = Math.min(start + chunkSize, items.length);
+    const accountItems = items.slice(start, end);
+
+    if (accountItems.length > 0) {
+      chunks.push({
+        accountKey: ACCOUNT_KEYS[i],
+        items: accountItems,
+      });
+    }
+  }
+
+  return chunks;
+}
+
 type TextShapeHandle = {
   slide: PowerPoint.Slide;
   shape: PowerPoint.Shape;
@@ -897,34 +976,15 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
         `paraphraseDocument => totalWords=${originalWordCount}, using ${numAccounts} account(s) via batch API`
       );
 
-      const buildPayload = (items: Array<{ text: string }>) => {
-        const chunks: string[] = [];
-        for (const item of items) {
-          chunks.push(PARAPHRASE_DELIMITER);
-          chunks.push(item.text);
-        }
-        return chunks.join("\n\n");
-      };
-
-      // Split eligible shapes across accounts
-      const chunkSize = Math.ceil(eligibleShapes.length / numAccounts);
-      const shapeChunks: Array<Array<{ shape: PowerPoint.Shape; text: string; shapeIndex: number }>> = [];
-      for (let i = 0; i < numAccounts; i++) {
-        const start = i * chunkSize;
-        const end = Math.min(start + chunkSize, eligibleShapes.length);
-        shapeChunks.push(eligibleShapes.slice(start, end));
-      }
+      const accountChunks = splitIntoAccountChunks(eligibleShapes, numAccounts);
 
       const batchPayload: Record<string, string> = { mode: "dual" };
       const usedAccounts: AccountKey[] = [];
 
-      shapeChunks.forEach((chunk, idx) => {
-        if (chunk.length > 0) {
-          const accountKey = ACCOUNT_KEYS[idx];
-          batchPayload[accountKey] = buildPayload(chunk);
-          usedAccounts.push(accountKey);
-          console.log(`paraphraseDocument => ${accountKey}: ${chunk.length} shapes`);
-        }
+      accountChunks.forEach((chunk) => {
+        batchPayload[chunk.accountKey] = buildBatchPayloadText(chunk.items);
+        usedAccounts.push(chunk.accountKey);
+        console.log(`paraphraseDocument => ${chunk.accountKey}: ${chunk.items.length} shapes`);
       });
 
       console.log(`paraphraseDocument => sending batch request (${eligibleShapes.length} shapes total)`);
@@ -944,61 +1004,25 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
       allWarnings.push(...batchWarnings);
 
       const paraphrasedChunks: string[] = [];
-      for (const key of usedAccounts) {
-        const result = data[key];
+      for (const chunk of accountChunks) {
+        const result = data[chunk.accountKey];
         if (!result) {
-          throw new Error(`No response received for account ${key}`);
+          throw new Error(`No response received for account ${chunk.accountKey}`);
         }
         const paraphrasedText = result.secondMode;
         if (!paraphrasedText) {
           if (result.error) {
-            throw new Error(`Account ${key} failed: ${result.error}`);
+            throw new Error(`Account ${chunk.accountKey} failed: ${result.error}`);
           }
-          throw new Error(`No paraphrased text received from account ${key}`);
+          throw new Error(`No paraphrased text received from account ${chunk.accountKey}`);
         }
         paraphrasedChunks.push(paraphrasedText);
       }
 
-      const parseResponse = (text: string, expectedCount: number) => {
-        let parts = text
-          .split(new RegExp(`${PARAPHRASE_DELIMITER}`, "i"))
-          .map((x: string) => x.trim())
-          .filter((x: string) => x.length > 0);
-
-        if (parts.length < expectedCount) {
-          console.warn(
-            `Mismatch detected (Expected ${expectedCount}, got ${parts.length}). Attempting to recover merged parts...`
-          );
-
-          const recoveredParts: string[] = [];
-          for (const part of parts) {
-            if (part.includes("\n\n")) {
-              const subParts = part
-                .split(/\n\n+/)
-                .map((p) => p.trim())
-                .filter((p) => p.length > 0);
-              recoveredParts.push(...subParts);
-            } else {
-              recoveredParts.push(part);
-            }
-          }
-
-          if (recoveredParts.length === expectedCount) {
-            console.log("Successfully recovered merged parts!");
-            return recoveredParts;
-          } else if (Math.abs(recoveredParts.length - expectedCount) < Math.abs(parts.length - expectedCount)) {
-            console.log(`Partial recovery: now have ${recoveredParts.length} parts.`);
-            return recoveredParts;
-          }
-        }
-
-        return parts;
-      };
-
-      const parsedChunks = shapeChunks.map((chunk, idx) => parseResponse(paraphrasedChunks[idx], chunk.length));
+      const parsedChunks = accountChunks.map((chunk, idx) => parseParaphraseParts(paraphrasedChunks[idx], chunk.items.length));
 
       for (let idx = 0; idx < parsedChunks.length; idx++) {
-        const expected = shapeChunks[idx].length;
+        const expected = accountChunks[idx].items.length;
         const actual = parsedChunks[idx].length;
         if (actual !== expected) {
           console.error(`paraphraseDocument => mismatch in chunk ${idx}: sent ${expected}, received ${actual}`);
@@ -1016,9 +1040,10 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
       let updatedCount = 0;
       let newPreview = "";
       let isFirstShape = true;
-      for (let chunkIndex = 0; chunkIndex < shapeChunks.length; chunkIndex++) {
-        const shapesInChunk = shapeChunks[chunkIndex];
+      for (let chunkIndex = 0; chunkIndex < accountChunks.length; chunkIndex++) {
+        const shapesInChunk = accountChunks[chunkIndex].items;
         const parts = parsedChunks[chunkIndex];
+        const pendingUpdates: Array<{ item: EligibleShape; newText: string }> = [];
 
         for (let i = 0; i < shapesInChunk.length; i++) {
           const item = shapesInChunk[i];
@@ -1156,33 +1181,15 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
         `paraphraseDocumentStandard => totalWords=${originalWordCount}, using ${numAccounts} account(s) via batch API`
       );
 
-      const buildPayload = (items: Array<{ text: string }>) => {
-        const chunks: string[] = [];
-        for (const item of items) {
-          chunks.push(PARAPHRASE_DELIMITER);
-          chunks.push(item.text);
-        }
-        return chunks.join("\n\n");
-      };
-
-      const chunkSize = Math.ceil(eligibleShapes.length / numAccounts);
-      const shapeChunks: Array<Array<{ shape: PowerPoint.Shape; text: string; shapeIndex: number }>> = [];
-      for (let i = 0; i < numAccounts; i++) {
-        const start = i * chunkSize;
-        const end = Math.min(start + chunkSize, eligibleShapes.length);
-        shapeChunks.push(eligibleShapes.slice(start, end));
-      }
+      const accountChunks = splitIntoAccountChunks(eligibleShapes, numAccounts);
 
       const batchPayload: Record<string, string> = { mode: "standard" };
       const usedAccounts: AccountKey[] = [];
 
-      shapeChunks.forEach((chunk, idx) => {
-        if (chunk.length > 0) {
-          const accountKey = ACCOUNT_KEYS[idx];
-          batchPayload[accountKey] = buildPayload(chunk);
-          usedAccounts.push(accountKey);
-          console.log(`paraphraseDocumentStandard => ${accountKey}: ${chunk.length} shapes`);
-        }
+      accountChunks.forEach((chunk) => {
+        batchPayload[chunk.accountKey] = buildBatchPayloadText(chunk.items);
+        usedAccounts.push(chunk.accountKey);
+        console.log(`paraphraseDocumentStandard => ${chunk.accountKey}: ${chunk.items.length} shapes`);
       });
 
       console.log(`paraphraseDocumentStandard => sending batch request (${eligibleShapes.length} shapes total)`);
@@ -1202,61 +1209,25 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
       allWarnings.push(...batchWarnings);
 
       const paraphrasedChunks: string[] = [];
-      for (const key of usedAccounts) {
-        const result = data[key];
+      for (const chunk of accountChunks) {
+        const result = data[chunk.accountKey];
         if (!result) {
-          throw new Error(`No response received for account ${key}`);
+          throw new Error(`No response received for account ${chunk.accountKey}`);
         }
         const paraphrasedText = result.result;
         if (!paraphrasedText) {
           if (result.error) {
-            throw new Error(`Account ${key} failed: ${result.error}`);
+            throw new Error(`Account ${chunk.accountKey} failed: ${result.error}`);
           }
-          throw new Error(`No paraphrased text received from account ${key}`);
+          throw new Error(`No paraphrased text received from account ${chunk.accountKey}`);
         }
         paraphrasedChunks.push(paraphrasedText);
       }
 
-      const parseResponse = (text: string, expectedCount: number) => {
-        let parts = text
-          .split(new RegExp(`${PARAPHRASE_DELIMITER}`, "i"))
-          .map((x: string) => x.trim())
-          .filter((x: string) => x.length > 0);
-
-        if (parts.length < expectedCount) {
-          console.warn(
-            `Mismatch detected (Expected ${expectedCount}, got ${parts.length}). Attempting to recover merged parts...`
-          );
-
-          const recoveredParts: string[] = [];
-          for (const part of parts) {
-            if (part.includes("\n\n")) {
-              const subParts = part
-                .split(/\n\n+/)
-                .map((p) => p.trim())
-                .filter((p) => p.length > 0);
-              recoveredParts.push(...subParts);
-            } else {
-              recoveredParts.push(part);
-            }
-          }
-
-          if (recoveredParts.length === expectedCount) {
-            console.log("Successfully recovered merged parts!");
-            return recoveredParts;
-          } else if (Math.abs(recoveredParts.length - expectedCount) < Math.abs(parts.length - expectedCount)) {
-            console.log(`Partial recovery: now have ${recoveredParts.length} parts.`);
-            return recoveredParts;
-          }
-        }
-
-        return parts;
-      };
-
-      const parsedChunks = shapeChunks.map((chunk, idx) => parseResponse(paraphrasedChunks[idx], chunk.length));
+      const parsedChunks = accountChunks.map((chunk, idx) => parseParaphraseParts(paraphrasedChunks[idx], chunk.items.length));
 
       for (let idx = 0; idx < parsedChunks.length; idx++) {
-        const expected = shapeChunks[idx].length;
+        const expected = accountChunks[idx].items.length;
         const actual = parsedChunks[idx].length;
         if (actual !== expected) {
           console.error(`paraphraseDocumentStandard => mismatch in chunk ${idx}: sent ${expected}, received ${actual}`);
@@ -1274,9 +1245,10 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
       let updatedCount = 0;
       let newPreview = "";
       let isFirstShape = true;
-      for (let chunkIndex = 0; chunkIndex < shapeChunks.length; chunkIndex++) {
-        const shapesInChunk = shapeChunks[chunkIndex];
+      for (let chunkIndex = 0; chunkIndex < accountChunks.length; chunkIndex++) {
+        const shapesInChunk = accountChunks[chunkIndex].items;
         const parts = parsedChunks[chunkIndex];
+        const pendingUpdates: Array<{ item: EligibleShape; newText: string }> = [];
 
         for (let i = 0; i < shapesInChunk.length; i++) {
           const item = shapesInChunk[i];
@@ -1329,6 +1301,243 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
   } catch (error) {
     console.error("Error in paraphraseDocumentStandard:", error);
     throw new Error(`Error paraphrasing slide: ${error.message}`);
+  }
+}
+
+export async function paraphraseAllSlides(mode: "dual" | "standard" = "dual"): Promise<ParaphraseResult> {
+  const logPrefix = mode === "dual" ? "paraphraseAllSlides" : "paraphraseAllSlidesStandard";
+
+  try {
+    return await PowerPoint.run(async (context) => {
+      console.log(`${logPrefix} => start (all slides)`);
+
+      const allWarnings: string[] = [];
+      const healthResult = await checkServiceHealth();
+      if (healthResult.warnings.length > 0) {
+        console.warn("Health check warnings:", healthResult.warnings);
+        allWarnings.push(...healthResult.warnings);
+      }
+
+      const textShapes = await loadTextCapableShapes(context);
+      if (textShapes.length === 0) {
+        return {
+          message: "No text boxes found in presentation.",
+          warnings: allWarnings,
+        };
+      }
+
+      const eligibleShapes: EligibleShape[] = [];
+      const loadedHandles: TextShapeHandle[] = [];
+
+      for (const handle of textShapes) {
+        try {
+          handle.shape.textFrame.textRange.load("text");
+          loadedHandles.push(handle);
+        } catch (error) {
+          console.warn(`${logPrefix} => unable to queue text load for ${describeShape(handle)}`, error);
+        }
+      }
+
+      if (loadedHandles.length > 0) {
+        await context.sync();
+      }
+
+      for (const handle of loadedHandles) {
+        let text = "";
+        try {
+          text = handle.shape.textFrame.textRange.text;
+        } catch (error) {
+          console.warn(`${logPrefix} => unable to read text for ${describeShape(handle)}`, error);
+          continue;
+        }
+
+        if (!text || !text.trim()) continue;
+
+        const trimmed = text.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+        if (!trimmed) {
+          continue;
+        }
+
+        const wordCount = countWords(trimmed);
+        const isTitle = handle.shapeIndex === 0 && wordCount < 10;
+
+        if (matchesReferenceHeader(trimmed)) {
+          console.log(`${logPrefix} => skipping reference header at slide ${handle.slideIndex}, shape ${handle.shapeIndex}`);
+          continue;
+        }
+
+        if (mode === "dual") {
+          if (isTitle || wordCount < 11 || trimmed.endsWith(":")) {
+            continue;
+          }
+        } else {
+          if (wordCount < 15) {
+            continue;
+          }
+        }
+
+        eligibleShapes.push({
+          shape: handle.shape,
+          text: trimmed,
+          shapeIndex: handle.shapeIndex,
+          slideIndex: handle.slideIndex,
+        });
+      }
+
+      if (eligibleShapes.length === 0) {
+        return {
+          message:
+            mode === "dual"
+              ? "No eligible text boxes found in presentation to paraphrase."
+              : "No eligible text boxes found in presentation (need at least 15 words).",
+          warnings: allWarnings,
+        };
+      }
+
+      const originalWordCount = eligibleShapes.reduce((sum, item) => sum + countWords(item.text), 0);
+      const originalPreview = eligibleShapes[0].text.substring(0, 50) + "...";
+
+      let numAccounts = 1;
+      if (originalWordCount > 1500) {
+        numAccounts = 3;
+      } else if (originalWordCount >= 500) {
+        numAccounts = 2;
+      }
+
+      console.log(`${logPrefix} => totalWords=${originalWordCount}, using ${numAccounts} account(s)`);
+
+      const accountChunks = splitIntoAccountChunks(eligibleShapes, numAccounts);
+
+      const batchPayload: Record<string, string> = { mode };
+      const usedAccounts: AccountKey[] = [];
+
+      accountChunks.forEach((chunk) => {
+        batchPayload[chunk.accountKey] = buildBatchPayloadText(chunk.items);
+        usedAccounts.push(chunk.accountKey);
+        console.log(`${logPrefix} => ${chunk.accountKey}: ${chunk.items.length} shapes`);
+      });
+
+      const response = await fetch(BATCH_API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(batchPayload),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Batch API request failed with status ${response.status}`);
+      }
+
+      const data: BatchApiResponse = await response.json();
+      const batchWarnings = collectBatchWarnings(data, usedAccounts);
+      allWarnings.push(...batchWarnings);
+
+      const paraphrasedChunks: string[] = [];
+      for (const chunk of accountChunks) {
+        const result = data[chunk.accountKey];
+        if (!result) {
+          throw new Error(`No response received for account ${chunk.accountKey}`);
+        }
+
+        const paraphrasedText = mode === "dual" ? result.secondMode : result.result;
+        if (!paraphrasedText) {
+          if (result.error) {
+            throw new Error(`Account ${chunk.accountKey} failed: ${result.error}`);
+          }
+          throw new Error(`No paraphrased text received from account ${chunk.accountKey}`);
+        }
+
+        paraphrasedChunks.push(paraphrasedText);
+      }
+
+      const parsedChunks = accountChunks.map((chunk, idx) => parseParaphraseParts(paraphrasedChunks[idx], chunk.items.length));
+      for (let idx = 0; idx < parsedChunks.length; idx++) {
+        const expected = accountChunks[idx].items.length;
+        const actual = parsedChunks[idx].length;
+        if (actual !== expected) {
+          throw new Error(
+            `Paraphrase count mismatch. Sent ${eligibleShapes.length} text boxes, received ${parsedChunks.reduce((s, p) => s + p.length, 0)}. Aborting to prevent data loss.`
+          );
+        }
+      }
+
+      const originalTexts: string[] = [];
+      const newTexts: string[] = [];
+      let updatedCount = 0;
+      let newPreview = "";
+      let isFirst = true;
+
+      for (let chunkIndex = 0; chunkIndex < accountChunks.length; chunkIndex++) {
+        const shapesInChunk = accountChunks[chunkIndex].items;
+        const parts = parsedChunks[chunkIndex];
+        const pendingUpdates: Array<{ item: EligibleShape; newText: string }> = [];
+
+        for (let i = 0; i < shapesInChunk.length; i++) {
+          const item = shapesInChunk[i];
+          const newText = parts[i];
+
+          originalTexts.push(item.text);
+          newTexts.push(newText);
+
+          if (isFirst) {
+            newPreview = newText.substring(0, 50) + "...";
+            isFirst = false;
+          }
+
+          item.shape.textFrame.textRange.text = newText;
+          item.shape.textFrame.textRange.font.bold = false;
+          pendingUpdates.push({ item, newText });
+        }
+
+        try {
+          await context.sync();
+          updatedCount += pendingUpdates.length;
+        } catch (chunkError) {
+          try {
+            console.error(`${logPrefix} => batch update failed for chunk ${chunkIndex}, retrying per shape`, chunkError);
+            for (const pending of pendingUpdates) {
+              try {
+                pending.item.shape.textFrame.textRange.text = pending.newText;
+                pending.item.shape.textFrame.textRange.font.bold = false;
+                await context.sync();
+                updatedCount++;
+              } catch (updateError) {
+                console.error(
+                  `${logPrefix} => failed to update slide ${pending.item.slideIndex}, shape ${pending.item.shapeIndex}:`,
+                  updateError
+                );
+              }
+            }
+          } catch (retryError) {
+            console.error(`${logPrefix} => retry path failed for chunk ${chunkIndex}`, retryError);
+          }
+        }
+      }
+
+      const changeMetrics = calculateTextChangeMetrics(originalTexts, newTexts);
+      const slideCount = new Set(eligibleShapes.map((item) => item.slideIndex)).size;
+
+      return {
+        message:
+          mode === "dual"
+            ? `Successfully paraphrased ${updatedCount} text box${updatedCount === 1 ? "" : "es"} across ${slideCount} slide${slideCount === 1 ? "" : "s"}.`
+            : `Successfully paraphrased ${updatedCount} text box${updatedCount === 1 ? "" : "es"} across ${slideCount} slide${slideCount === 1 ? "" : "s"} (Standard mode).`,
+        warnings: allWarnings,
+        metrics: {
+          originalWordCount: changeMetrics.totalOriginalWords,
+          newWordCount: changeMetrics.totalNewWords,
+          wordsChanged: changeMetrics.wordsChanged,
+          wordChangePercent: changeMetrics.changePercent,
+          reusedWords: changeMetrics.reusedWords,
+          reusePercent: changeMetrics.reusePercent,
+          addedWords: changeMetrics.addedWords,
+          originalPreview,
+          newPreview,
+        },
+      };
+    });
+  } catch (error) {
+    console.error(`${logPrefix} => error`, error);
+    throw new Error(`Error paraphrasing all slides: ${error.message}`);
   }
 }
 

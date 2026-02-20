@@ -5,6 +5,7 @@ import {
   analyzeDocument as analyzeDocumentInPowerPoint,
   insertText as insertTextInPowerPoint,
   normalizeBodyBold as normalizeBodyBoldInPowerPoint,
+  paraphraseAllSlides as paraphraseAllSlidesInPowerPoint,
   paraphraseDocument as paraphraseDocumentInPowerPoint,
   paraphraseDocumentStandard,
   paraphraseSelectedText as paraphraseSelectedTextInPowerPointSelection,
@@ -145,6 +146,26 @@ export async function paraphraseSelectedTextStandard(): Promise<ParaphraseResult
     }
     default:
       throw new Error("This function is only available in Word and PowerPoint");
+  }
+}
+
+export async function paraphraseAllSlides(): Promise<ParaphraseResult> {
+  await Office.onReady();
+  switch (Office.context.host) {
+    case Office.HostType.PowerPoint:
+      return await paraphraseAllSlidesInPowerPoint("dual");
+    default:
+      throw new Error("This function is only available in PowerPoint");
+  }
+}
+
+export async function paraphraseAllSlidesStandard(): Promise<ParaphraseResult> {
+  await Office.onReady();
+  switch (Office.context.host) {
+    case Office.HostType.PowerPoint:
+      return await paraphraseAllSlidesInPowerPoint("standard");
+    default:
+      throw new Error("This function is only available in PowerPoint");
   }
 }
 

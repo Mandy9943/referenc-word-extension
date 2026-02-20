@@ -7,6 +7,8 @@ import {
   ChangeMetrics,
   normalizeBoldText,
   ParaphraseResult,
+  paraphraseAllSlides,
+  paraphraseAllSlidesStandard,
   paraphraseSelectedText,
   paraphraseSelectedTextStandard,
   removeLinks,
@@ -193,7 +195,7 @@ const App: React.FC = () => {
     }
   };
 
-  const handleParaphraseText = async () => {
+  const runParaphraseAction = async (action: () => Promise<ParaphraseResult>) => {
     setStatus("loading");
     setParaphraseTime(0);
     setFailedAccount(null);
@@ -209,7 +211,7 @@ const App: React.FC = () => {
     }, 100);
 
     try {
-      const result: ParaphraseResult = await paraphraseSelectedText();
+      const result: ParaphraseResult = await action();
       setStatus("success");
       setFailedAccount(null);
       if (result.warnings && result.warnings.length > 0) {
@@ -236,47 +238,20 @@ const App: React.FC = () => {
     }
   };
 
+  const handleParaphraseText = async () => {
+    await runParaphraseAction(paraphraseSelectedText);
+  };
+
   const handleParaphraseTextStandard = async () => {
-    setStatus("loading");
-    setParaphraseTime(0);
-    setFailedAccount(null);
-    setWarnings([]);
-    setErrorMessage(null);
-    setChangeMetrics(null);
-    const startTime = Date.now();
+    await runParaphraseAction(paraphraseSelectedTextStandard);
+  };
 
-    if (timerRef.current) clearInterval(timerRef.current);
+  const handleParaphraseAllSlides = async () => {
+    await runParaphraseAction(paraphraseAllSlides);
+  };
 
-    timerRef.current = setInterval(() => {
-      setParaphraseTime((Date.now() - startTime) / 1000);
-    }, 100);
-
-    try {
-      const result: ParaphraseResult = await paraphraseSelectedTextStandard();
-      setStatus("success");
-      setFailedAccount(null);
-      if (result.warnings && result.warnings.length > 0) {
-        setWarnings(result.warnings);
-      }
-      if (result.metrics) {
-        setChangeMetrics(result.metrics);
-      }
-    } catch (error) {
-      setStatus("error");
-      setErrorMessage(error.message || "An error occurred");
-      // Extract failed account info from error message if available
-      if (error.message) {
-        const match = error.message.match(/Account (acc[123]) failed/);
-        if (match) {
-          setFailedAccount({ accountId: match[1] });
-        }
-      }
-    } finally {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
-    }
+  const handleParaphraseAllSlidesStandard = async () => {
+    await runParaphraseAction(paraphraseAllSlidesStandard);
   };
 
   const handleRestartAccount = async () => {
@@ -458,6 +433,28 @@ const App: React.FC = () => {
               STANDARD
             </Button>
             {hostType === Office.HostType.PowerPoint && (
+              <>
+                <Button
+                  appearance="secondary"
+                  onClick={handleParaphraseAllSlides}
+                  disabled={status === "loading"}
+                  className={styles.button}
+                  style={{ backgroundColor: "#2c8d58ff", color: "#fff" }}
+                >
+                  ALL SLIDES (FAST)
+                </Button>
+                <Button
+                  appearance="secondary"
+                  onClick={handleParaphraseAllSlidesStandard}
+                  disabled={status === "loading"}
+                  className={styles.button}
+                  style={{ backgroundColor: "#1f7a9bff", color: "#fff" }}
+                >
+                  ALL SLIDES (STANDARD)
+                </Button>
+              </>
+            )}
+            {hostType === Office.HostType.PowerPoint && (
               <Text
                 size={200}
                 style={{
@@ -468,6 +465,8 @@ const App: React.FC = () => {
                 }}
               >
                 PowerPoint tip: click in Speaker Notes and press Cmd/Ctrl+A, then click SIMPLE + SHORT or STANDARD.
+                <br />
+                One-click ALL SLIDES currently paraphrases slide text boxes in bulk.
               </Text>
             )}
 
