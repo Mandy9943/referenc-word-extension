@@ -10,9 +10,10 @@ Essay Manager is a Word and PowerPoint task pane add‑in that helps writers cle
 4. [External services & configuration](#external-services--configuration)
 5. [Getting started](#getting-started)
 6. [Everyday usage](#everyday-usage)
-7. [Testing & quality](#testing--quality)
-8. [Troubleshooting & tips](#troubleshooting--tips)
-9. [Contributing & license](#contributing--license)
+7. [Bulk PPTX automation](#bulk-pptx-automation)
+8. [Testing & quality](#testing--quality)
+9. [Troubleshooting & tips](#troubleshooting--tips)
+10. [Contributing & license](#contributing--license)
 
 ## Key capabilities
 
@@ -117,6 +118,34 @@ GEMINI_API_KEY=AIza...
 * All Word mutations happen within a single `Word.run` batch to keep context state consistent.
 * PowerPoint text updates re-load each `textFrame.textRange` to avoid stale object errors.
 * The `Clean` pipeline is intentionally sequential: removing citations first prevents dangling periods before URL removal and weird-number cleanup.
+
+## Bulk PPTX automation
+
+If you need one-shot paraphrasing for large decks, use the offline PPTX script. It reads slide text boxes and speaker notes from the `.pptx`, sends batched requests to the same AnalizeAI endpoint used by the add-in, and writes text back to the same slide/notes paragraph locations.
+
+Basic run:
+
+```bash
+npm run pptx:paraphrase -- "/absolute/path/to/input.pptx"
+```
+
+Output defaults to `input.paraphrased.pptx` next to the original file.
+
+Useful options:
+
+```bash
+python3 scripts/paraphrase_pptx.py "/path/in.pptx" \
+  --output "/path/out.pptx" \
+  --mode dual \
+  --max-items-per-request 120 \
+  --max-words-per-request 2400
+```
+
+Notes:
+
+* Use `--no-notes` to paraphrase only slide text.
+* Use `--no-slides` to paraphrase only speaker notes.
+* Use `--dry-run` to inspect eligible paragraph counts without modifying files.
 
 ## Testing & quality
 

@@ -253,12 +253,15 @@ function shuffleInPlace<T>(array: T[]): T[] {
 
 const TEXT_CAPABLE_SHAPE_TYPES = new Set(["GeometricShape", "TextBox", "Placeholder", "SmartArt", "Group"]);
 const PARAPHRASE_DELIMITER = "qbpdelim123";
+const MAX_BULK_ITEMS_PER_REQUEST = 120;
+const MAX_BULK_WORDS_PER_REQUEST = 2400;
 
 type EligibleShape = {
   shape: PowerPoint.Shape;
   text: string;
   shapeIndex: number;
   slideIndex: number;
+  wordCount: number;
 };
 
 function countWords(text: string): number {
@@ -331,6 +334,49 @@ function splitIntoAccountChunks<T>(items: T[], numAccounts: number): Array<{ acc
   }
 
   return chunks;
+}
+
+function chooseAccountCount(totalWords: number): number {
+  if (totalWords > 1500) {
+    return 3;
+  }
+  if (totalWords >= 500) {
+    return 2;
+  }
+  return 1;
+}
+
+function takeBulkBatch(
+  items: EligibleShape[],
+  startIndex: number,
+  maxItems: number,
+  maxWords: number
+): { batchItems: EligibleShape[]; nextIndex: number; totalWords: number } {
+  const batchItems: EligibleShape[] = [];
+  let totalWords = 0;
+  let idx = startIndex;
+
+  while (idx < items.length && batchItems.length < maxItems) {
+    const nextItem = items[idx];
+    if (batchItems.length > 0 && totalWords + nextItem.wordCount > maxWords) {
+      break;
+    }
+    batchItems.push(nextItem);
+    totalWords += nextItem.wordCount;
+    idx++;
+  }
+
+  if (batchItems.length === 0 && idx < items.length) {
+    batchItems.push(items[idx]);
+    totalWords = items[idx].wordCount;
+    idx++;
+  }
+
+  return {
+    batchItems,
+    nextIndex: idx,
+    totalWords,
+  };
 }
 
 type TextShapeHandle = {
@@ -1327,6 +1373,12 @@ export async function paraphraseAllSlides(mode: "dual" | "standard" = "dual"): P
       }
 
       const eligibleShapes: EligibleShape[] = [];
+      const skipCounters = {
+        title: 0,
+        short: 0,
+        endsColon: 0,
+        referenceHeader: 0,
+      };
       const loadedHandles: TextShapeHandle[] = [];
 
       for (const handle of textShapes) {
@@ -1362,16 +1414,27 @@ export async function paraphraseAllSlides(mode: "dual" | "standard" = "dual"): P
         const isTitle = handle.shapeIndex === 0 && wordCount < 10;
 
         if (matchesReferenceHeader(trimmed)) {
+          skipCounters.referenceHeader++;
           console.log(`${logPrefix} => skipping reference header at slide ${handle.slideIndex}, shape ${handle.shapeIndex}`);
           continue;
         }
 
         if (mode === "dual") {
-          if (isTitle || wordCount < 11 || trimmed.endsWith(":")) {
+          if (isTitle) {
+            skipCounters.title++;
+            continue;
+          }
+          if (wordCount < 11) {
+            skipCounters.short++;
+            continue;
+          }
+          if (trimmed.endsWith(":")) {
+            skipCounters.endsColon++;
             continue;
           }
         } else {
           if (wordCount < 15) {
+            skipCounters.short++;
             continue;
           }
         }
@@ -1381,6 +1444,7 @@ export async function paraphraseAllSlides(mode: "dual" | "standard" = "dual"): P
           text: trimmed,
           shapeIndex: handle.shapeIndex,
           slideIndex: handle.slideIndex,
+          wordCount,
         });
       }
 
@@ -1394,105 +1458,120 @@ export async function paraphraseAllSlides(mode: "dual" | "standard" = "dual"): P
         };
       }
 
-      const originalWordCount = eligibleShapes.reduce((sum, item) => sum + countWords(item.text), 0);
+      const totalSkipped =
+        skipCounters.title + skipCounters.short + skipCounters.endsColon + skipCounters.referenceHeader;
+      if (totalSkipped > 0) {
+        allWarnings.push(
+          `Skipped ${totalSkipped} text boxes (title: ${skipCounters.title}, short: ${skipCounters.short}, reference headers: ${skipCounters.referenceHeader}, ends with colon: ${skipCounters.endsColon}).`
+        );
+      }
+
+      const originalWordCount = eligibleShapes.reduce((sum, item) => sum + item.wordCount, 0);
       const originalPreview = eligibleShapes[0].text.substring(0, 50) + "...";
-
-      let numAccounts = 1;
-      if (originalWordCount > 1500) {
-        numAccounts = 3;
-      } else if (originalWordCount >= 500) {
-        numAccounts = 2;
-      }
-
-      console.log(`${logPrefix} => totalWords=${originalWordCount}, using ${numAccounts} account(s)`);
-
-      const accountChunks = splitIntoAccountChunks(eligibleShapes, numAccounts);
-
-      const batchPayload: Record<string, string> = { mode };
-      const usedAccounts: AccountKey[] = [];
-
-      accountChunks.forEach((chunk) => {
-        batchPayload[chunk.accountKey] = buildBatchPayloadText(chunk.items);
-        usedAccounts.push(chunk.accountKey);
-        console.log(`${logPrefix} => ${chunk.accountKey}: ${chunk.items.length} shapes`);
-      });
-
-      const response = await fetch(BATCH_API_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(batchPayload),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Batch API request failed with status ${response.status}`);
-      }
-
-      const data: BatchApiResponse = await response.json();
-      const batchWarnings = collectBatchWarnings(data, usedAccounts);
-      allWarnings.push(...batchWarnings);
-
-      const paraphrasedChunks: string[] = [];
-      for (const chunk of accountChunks) {
-        const result = data[chunk.accountKey];
-        if (!result) {
-          throw new Error(`No response received for account ${chunk.accountKey}`);
-        }
-
-        const paraphrasedText = mode === "dual" ? result.secondMode : result.result;
-        if (!paraphrasedText) {
-          if (result.error) {
-            throw new Error(`Account ${chunk.accountKey} failed: ${result.error}`);
-          }
-          throw new Error(`No paraphrased text received from account ${chunk.accountKey}`);
-        }
-
-        paraphrasedChunks.push(paraphrasedText);
-      }
-
-      const parsedChunks = accountChunks.map((chunk, idx) => parseParaphraseParts(paraphrasedChunks[idx], chunk.items.length));
-      for (let idx = 0; idx < parsedChunks.length; idx++) {
-        const expected = accountChunks[idx].items.length;
-        const actual = parsedChunks[idx].length;
-        if (actual !== expected) {
-          throw new Error(
-            `Paraphrase count mismatch. Sent ${eligibleShapes.length} text boxes, received ${parsedChunks.reduce((s, p) => s + p.length, 0)}. Aborting to prevent data loss.`
-          );
-        }
-      }
 
       const originalTexts: string[] = [];
       const newTexts: string[] = [];
       let updatedCount = 0;
       let newPreview = "";
       let isFirst = true;
+      let requestCount = 0;
+      let cursor = 0;
 
-      for (let chunkIndex = 0; chunkIndex < accountChunks.length; chunkIndex++) {
-        const shapesInChunk = accountChunks[chunkIndex].items;
-        const parts = parsedChunks[chunkIndex];
-        const pendingUpdates: Array<{ item: EligibleShape; newText: string }> = [];
+      while (cursor < eligibleShapes.length) {
+        requestCount++;
+        const requestBatch = takeBulkBatch(
+          eligibleShapes,
+          cursor,
+          MAX_BULK_ITEMS_PER_REQUEST,
+          MAX_BULK_WORDS_PER_REQUEST
+        );
+        cursor = requestBatch.nextIndex;
 
-        for (let i = 0; i < shapesInChunk.length; i++) {
-          const item = shapesInChunk[i];
-          const newText = parts[i];
+        const numAccounts = chooseAccountCount(requestBatch.totalWords);
+        console.log(
+          `${logPrefix} => request ${requestCount}: ${requestBatch.batchItems.length} shapes, ${requestBatch.totalWords} words, ${numAccounts} account(s)`
+        );
 
-          originalTexts.push(item.text);
-          newTexts.push(newText);
+        const accountChunks = splitIntoAccountChunks(requestBatch.batchItems, numAccounts);
+        const batchPayload: Record<string, string> = { mode };
+        const usedAccounts: AccountKey[] = [];
 
-          if (isFirst) {
-            newPreview = newText.substring(0, 50) + "...";
-            isFirst = false;
-          }
+        accountChunks.forEach((chunk) => {
+          batchPayload[chunk.accountKey] = buildBatchPayloadText(chunk.items);
+          usedAccounts.push(chunk.accountKey);
+        });
 
-          item.shape.textFrame.textRange.text = newText;
-          item.shape.textFrame.textRange.font.bold = false;
-          pendingUpdates.push({ item, newText });
+        const response = await fetch(BATCH_API_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(batchPayload),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Batch API request failed with status ${response.status}`);
         }
 
-        try {
-          await context.sync();
-          updatedCount += pendingUpdates.length;
-        } catch (chunkError) {
+        const data: BatchApiResponse = await response.json();
+        const batchWarnings = collectBatchWarnings(data, usedAccounts);
+        allWarnings.push(...batchWarnings);
+
+        const paraphrasedChunks: string[] = [];
+        for (const chunk of accountChunks) {
+          const result = data[chunk.accountKey];
+          if (!result) {
+            throw new Error(`No response received for account ${chunk.accountKey}`);
+          }
+
+          const paraphrasedText = mode === "dual" ? result.secondMode : result.result;
+          if (!paraphrasedText) {
+            if (result.error) {
+              throw new Error(`Account ${chunk.accountKey} failed: ${result.error}`);
+            }
+            throw new Error(`No paraphrased text received from account ${chunk.accountKey}`);
+          }
+
+          paraphrasedChunks.push(paraphrasedText);
+        }
+
+        const parsedChunks = accountChunks.map((chunk, idx) =>
+          parseParaphraseParts(paraphrasedChunks[idx], chunk.items.length)
+        );
+        for (let idx = 0; idx < parsedChunks.length; idx++) {
+          const expected = accountChunks[idx].items.length;
+          const actual = parsedChunks[idx].length;
+          if (actual !== expected) {
+            throw new Error(
+              `Paraphrase count mismatch. Sent ${requestBatch.batchItems.length} text boxes, received ${parsedChunks.reduce((s, p) => s + p.length, 0)}. Aborting to prevent data loss.`
+            );
+          }
+        }
+
+        for (let chunkIndex = 0; chunkIndex < accountChunks.length; chunkIndex++) {
+          const shapesInChunk = accountChunks[chunkIndex].items;
+          const parts = parsedChunks[chunkIndex];
+          const pendingUpdates: Array<{ item: EligibleShape; newText: string }> = [];
+
+          for (let i = 0; i < shapesInChunk.length; i++) {
+            const item = shapesInChunk[i];
+            const newText = parts[i];
+
+            originalTexts.push(item.text);
+            newTexts.push(newText);
+
+            if (isFirst) {
+              newPreview = newText.substring(0, 50) + "...";
+              isFirst = false;
+            }
+
+            item.shape.textFrame.textRange.text = newText;
+            item.shape.textFrame.textRange.font.bold = false;
+            pendingUpdates.push({ item, newText });
+          }
+
           try {
+            await context.sync();
+            updatedCount += pendingUpdates.length;
+          } catch (chunkError) {
             console.error(`${logPrefix} => batch update failed for chunk ${chunkIndex}, retrying per shape`, chunkError);
             for (const pending of pendingUpdates) {
               try {
@@ -1507,8 +1586,6 @@ export async function paraphraseAllSlides(mode: "dual" | "standard" = "dual"): P
                 );
               }
             }
-          } catch (retryError) {
-            console.error(`${logPrefix} => retry path failed for chunk ${chunkIndex}`, retryError);
           }
         }
       }
@@ -1519,8 +1596,8 @@ export async function paraphraseAllSlides(mode: "dual" | "standard" = "dual"): P
       return {
         message:
           mode === "dual"
-            ? `Successfully paraphrased ${updatedCount} text box${updatedCount === 1 ? "" : "es"} across ${slideCount} slide${slideCount === 1 ? "" : "s"}.`
-            : `Successfully paraphrased ${updatedCount} text box${updatedCount === 1 ? "" : "es"} across ${slideCount} slide${slideCount === 1 ? "" : "s"} (Standard mode).`,
+            ? `Successfully paraphrased ${updatedCount} text box${updatedCount === 1 ? "" : "es"} across ${slideCount} slide${slideCount === 1 ? "" : "s"} in ${requestCount} batch${requestCount === 1 ? "" : "es"}.`
+            : `Successfully paraphrased ${updatedCount} text box${updatedCount === 1 ? "" : "es"} across ${slideCount} slide${slideCount === 1 ? "" : "s"} in ${requestCount} batch${requestCount === 1 ? "" : "es"} (Standard mode).`,
         warnings: allWarnings,
         metrics: {
           originalWordCount: changeMetrics.totalOriginalWords,

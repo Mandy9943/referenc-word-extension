@@ -20,6 +20,7 @@
     "build:dev": "webpack --mode development",
     "convert-to-single-host": "node convertToSingleHost.js",
     "dev-server": "webpack serve --mode development",
+    "pptx:paraphrase": "python3 scripts/paraphrase_pptx.py",
     "lint": "office-addin-lint check",
     "lint:fix": "office-addin-lint fix",
     "prettier": "office-addin-lint prettier",
