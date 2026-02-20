@@ -7,6 +7,8 @@ import {
   normalizeBodyBold as normalizeBodyBoldInPowerPoint,
   paraphraseDocument as paraphraseDocumentInPowerPoint,
   paraphraseDocumentStandard,
+  paraphraseSelectedText as paraphraseSelectedTextInPowerPointSelection,
+  paraphraseSelectedTextStandard as paraphraseSelectedTextStandardInPowerPointSelection,
   removeLinks as removeLinksInPowerPoint,
   removeReferences as removeReferencesInPowerPoint,
   removeWeirdNumbers as removeWeirdNumbersInPowerPoint,
@@ -112,7 +114,14 @@ export async function paraphraseSelectedText(): Promise<ParaphraseResult> {
     case Office.HostType.Word:
       return await paraphraseDocumentInWord();
     case Office.HostType.PowerPoint: {
-      return await paraphraseDocumentInPowerPoint();
+      try {
+        return await paraphraseSelectedTextInPowerPointSelection();
+      } catch (error) {
+        if (shouldFallbackToSlideParaphrase(error)) {
+          return await paraphraseDocumentInPowerPoint();
+        }
+        throw error;
+      }
     }
     default:
       throw new Error("This function is only available in Word and PowerPoint");
@@ -125,11 +134,33 @@ export async function paraphraseSelectedTextStandard(): Promise<ParaphraseResult
     case Office.HostType.Word:
       return await paraphraseDocumentStandardInWord();
     case Office.HostType.PowerPoint: {
-      return await paraphraseDocumentStandard();
+      try {
+        return await paraphraseSelectedTextStandardInPowerPointSelection();
+      } catch (error) {
+        if (shouldFallbackToSlideParaphrase(error)) {
+          return await paraphraseDocumentStandard();
+        }
+        throw error;
+      }
     }
     default:
-      throw new Error("This function is only available in Word");
+      throw new Error("This function is only available in Word and PowerPoint");
   }
+}
+
+function shouldFallbackToSlideParaphrase(error: unknown): boolean {
+  const message = String((error as Error)?.message || "").toLowerCase();
+  const selectionFallbackMarkers = [
+    "no text selected",
+    "there is no text selected",
+    "coercion type",
+    "cannot coerce",
+    "not a text selection",
+  ];
+
+  return (
+    selectionFallbackMarkers.some((marker) => message.includes(marker))
+  );
 }
 
 export async function normalizeBoldText() {

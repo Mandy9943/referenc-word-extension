@@ -147,6 +147,7 @@ const App: React.FC = () => {
   const styles = useStyles();
   const [status, setStatus] = React.useState<Status>("idle");
   const [isValidHost, setIsValidHost] = React.useState(false);
+  const [hostType, setHostType] = React.useState<Office.HostType | null>(null);
   const [insertEveryOther, setInsertEveryOther] = React.useState(false);
   const [paraphraseTime, setParaphraseTime] = React.useState<number | null>(null);
   const [failedAccount, setFailedAccount] = React.useState<FailedAccount | null>(null);
@@ -158,6 +159,7 @@ const App: React.FC = () => {
   React.useEffect(() => {
     Office.onReady((info) => {
       setIsValidHost(info.host === Office.HostType.Word || info.host === Office.HostType.PowerPoint);
+      setHostType(info.host);
     });
   }, []);
 
@@ -455,6 +457,19 @@ const App: React.FC = () => {
             >
               STANDARD
             </Button>
+            {hostType === Office.HostType.PowerPoint && (
+              <Text
+                size={200}
+                style={{
+                  maxWidth: "300px",
+                  textAlign: "center",
+                  color: tokens.colorNeutralForeground3,
+                  marginTop: "-8px",
+                }}
+              >
+                PowerPoint tip: click in Speaker Notes and press Cmd/Ctrl+A, then click SIMPLE + SHORT or STANDARD.
+              </Text>
+            )}
 
             <div
               style={{ display: "flex", alignItems: "center", marginBottom: "10px", width: "100%", maxWidth: "300px" }}

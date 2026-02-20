@@ -1333,6 +1333,14 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
 }
 
 export async function paraphraseSelectedText(): Promise<ParaphraseResult> {
+  return paraphraseSelectedTextWithMode("dual");
+}
+
+export async function paraphraseSelectedTextStandard(): Promise<ParaphraseResult> {
+  return paraphraseSelectedTextWithMode("standard");
+}
+
+async function paraphraseSelectedTextWithMode(mode: "dual" | "standard"): Promise<ParaphraseResult> {
   return new Promise((resolve, reject) => {
     Office.context.document.getSelectedDataAsync(Office.CoercionType.Text, async (result) => {
       if (result.status === Office.AsyncResultStatus.Failed) {
@@ -1340,7 +1348,8 @@ export async function paraphraseSelectedText(): Promise<ParaphraseResult> {
         return;
       }
       const selectedText = result.value as string;
-      if (!selectedText || !selectedText.trim()) {
+      const trimmedSelectedText = selectedText?.trim() || "";
+      if (!trimmedSelectedText) {
         reject(new Error("No text selected"));
         return;
       }
@@ -1356,7 +1365,7 @@ export async function paraphraseSelectedText(): Promise<ParaphraseResult> {
         const response = await fetch(BATCH_API_URL, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ acc1: selectedText.trim(), mode: "dual" }),
+          body: JSON.stringify({ acc1: trimmedSelectedText, mode }),
         });
 
         if (!response.ok) {
@@ -1371,19 +1380,37 @@ export async function paraphraseSelectedText(): Promise<ParaphraseResult> {
         if (!resultAcc1) {
           throw new Error("No response received for account acc1");
         }
-        const paraphrasedText = resultAcc1.secondMode;
+        const paraphrasedText = mode === "dual" ? resultAcc1.secondMode : resultAcc1.result;
         if (!paraphrasedText) {
           if (resultAcc1.error) {
             throw new Error(`Account acc1 failed: ${resultAcc1.error}`);
           }
-          throw new Error("Invalid batch response: missing secondMode");
+          throw new Error(`Invalid batch response: missing ${mode === "dual" ? "secondMode" : "result"}`);
         }
 
         Office.context.document.setSelectedDataAsync(paraphrasedText, (setResult) => {
           if (setResult.status === Office.AsyncResultStatus.Failed) {
             reject(new Error(setResult.error.message));
           } else {
-            resolve({ message: "Text paraphrased successfully", warnings: allWarnings });
+            const changeMetrics = calculateTextChangeMetrics([trimmedSelectedText], [paraphrasedText]);
+            resolve({
+              message:
+                mode === "dual"
+                  ? "Selected text paraphrased successfully"
+                  : "Selected text paraphrased successfully (Standard mode)",
+              warnings: allWarnings,
+              metrics: {
+                originalWordCount: changeMetrics.totalOriginalWords,
+                newWordCount: changeMetrics.totalNewWords,
+                wordsChanged: changeMetrics.wordsChanged,
+                wordChangePercent: changeMetrics.changePercent,
+                reusedWords: changeMetrics.reusedWords,
+                reusePercent: changeMetrics.reusePercent,
+                addedWords: changeMetrics.addedWords,
+                originalPreview: trimmedSelectedText.substring(0, 50) + "...",
+                newPreview: paraphrasedText.substring(0, 50) + "...",
+              },
+            });
           }
         });
       } catch (error) {
