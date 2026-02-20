@@ -1,7 +1,7 @@
 import * as assert from "assert";
 import "mocha";
 import { OfficeMockObject } from "office-addin-mock";
-import { insertText } from "../../src/taskpane/powerpoint";
+import { inferReferenceSlideIndexFromSlideTexts, insertText } from "../../src/taskpane/powerpoint";
 
 /* global describe, global, it */
 
@@ -68,5 +68,40 @@ describe(`PowerPoint`, function () {
     await insertText("Hello PowerPoint");
 
     assert.strictEqual(shapes[0].text, "Hello PowerPoint");
+  });
+
+  it("Infers reference slide without explicit references title", function () {
+    const slideGroups = [
+      [
+        "Mental health in older adults is influenced by social isolation, chronic illness, and socioeconomic factors.",
+        "This section introduces prevalence and risk factors.",
+      ],
+      [
+        "Interventions include CBT, social prescribing, and integrated multidisciplinary care pathways.",
+      ],
+      [
+        "1. Alzheimer's Association (2024). Facts and Figures. https://www.alz.org/facts",
+        "2. WHO (2023). Mental health of older adults. Retrieved from https://www.who.int/news-room/fact-sheets",
+        "3. Smith, J., & Doe, A. (2022). Journal of Geriatric Care, 10(2), 1-10. doi:10.1000/example",
+      ],
+    ];
+
+    const inferredIndex = inferReferenceSlideIndexFromSlideTexts(slideGroups);
+    assert.strictEqual(inferredIndex, 2);
+  });
+
+  it("Returns -1 when no reference-like slide exists", function () {
+    const slideGroups = [
+      [
+        "Introduction to social care practice.",
+        "Learning outcomes and module overview.",
+      ],
+      [
+        "Case study findings show improvements in wellbeing and communication.",
+      ],
+    ];
+
+    const inferredIndex = inferReferenceSlideIndexFromSlideTexts(slideGroups);
+    assert.strictEqual(inferredIndex, -1);
   });
 });

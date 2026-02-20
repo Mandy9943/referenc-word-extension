@@ -32,6 +32,7 @@ NOTES_XML_RE = re.compile(r"^ppt/notesSlides/notesSlide(\d+)\.xml$")
 
 NS = {
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
 }
 
 # Keep these in sync with taskpane word/powerpoint logic.
@@ -196,7 +197,11 @@ def extract_candidates(
         tree = ET.ElementTree(root)
         xml_docs[archive_path] = tree
 
-        paragraphs = root.findall(".//a:txBody/a:p", NS)
+        # PowerPoint slide/notes text bodies are usually p:txBody with a:p children.
+        # Keep a fallback for a:txBody variants from non-standard generators.
+        paragraphs = root.findall(".//p:txBody/a:p", NS)
+        if not paragraphs:
+            paragraphs = root.findall(".//a:txBody/a:p", NS)
         first_non_empty_seen = False
         for paragraph_index, paragraph in enumerate(paragraphs):
             text_nodes = paragraph.findall(".//a:t", NS)
@@ -349,12 +354,17 @@ def parse_args() -> argparse.Namespace:
             "Paraphrase a PPTX in bulk (slides + speaker notes) and write output back to a new PPTX."
         )
     )
-    parser.add_argument("input", type=Path, help="Input .pptx file path")
+    parser.add_argument(
+        "input",
+        nargs="?",
+        type=Path,
+        help="Input .pptx file path. If omitted, auto-detects a single Desktop .pptx.",
+    )
     parser.add_argument(
         "-o",
         "--output",
         type=Path,
-        help="Output .pptx file path (default: <input>.paraphrased.pptx)",
+        help="Output .pptx file path (default: pr <input-name>.pptx)",
     )
     parser.add_argument(
         "--mode",
@@ -403,14 +413,67 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def resolve_input_path(provided_input: Path | None) -> Path:
+    if provided_input is not None:
+        return provided_input
+
+    desktop = Path.home() / "Desktop"
+    if not desktop.exists() or not desktop.is_dir():
+        raise RuntimeError(f"Desktop folder not found: {desktop}")
+
+    desktop_pptx = [
+        path
+        for path in desktop.iterdir()
+        if path.is_file()
+        and path.suffix.lower() == ".pptx"
+        and not path.name.startswith("~$")
+        and not path.name.lower().endswith(".paraphrased.pptx")
+    ]
+
+    existing_names = {path.name.lower() for path in desktop_pptx}
+    candidates: List[Path] = []
+    for path in desktop_pptx:
+        lower_name = path.name.lower()
+        if lower_name.startswith("pr "):
+            original_name = path.name[3:]
+            # Treat "pr <name>.pptx" as generated output only when "<name>.pptx"
+            # exists on Desktop in the same moment.
+            if original_name.lower() in existing_names:
+                continue
+        candidates.append(path)
+
+    candidates = sorted(candidates)
+
+    if len(candidates) == 1:
+        print(f"Auto-selected Desktop file: {candidates[0]}")
+        return candidates[0]
+
+    if len(candidates) == 0:
+        raise RuntimeError(
+            f"No .pptx file found on Desktop ({desktop}). Put one file there or pass the path explicitly."
+        )
+
+    preview = ", ".join(path.name for path in candidates[:5])
+    suffix = "..." if len(candidates) > 5 else ""
+    raise RuntimeError(
+        f"Found {len(candidates)} .pptx files on Desktop ({preview}{suffix}). "
+        "Keep only one file there or pass the path explicitly."
+    )
+
+
 def main() -> int:
     args = parse_args()
-
-    if not args.input.exists():
-        print(f"Input file does not exist: {args.input}", file=sys.stderr)
+    try:
+        input_path = resolve_input_path(args.input)
+    except RuntimeError as error:
+        print(str(error), file=sys.stderr)
         return 1
-    if args.input.suffix.lower() != ".pptx":
-        print(f"Input must be a .pptx file: {args.input}", file=sys.stderr)
+
+    if not input_path.exists():
+        print(f"Input file does not exist: {input_path}", file=sys.stderr)
+        return 1
+    if input_path.suffix.lower() != ".pptx":
+        print(f"Input must be a .pptx file: {input_path}", file=sys.stderr)
         return 1
 
     include_slides = not args.no_slides
@@ -422,10 +485,10 @@ def main() -> int:
     output_path = (
         args.output
         if args.output
-        else args.input.with_name(f"{args.input.stem}.paraphrased{args.input.suffix}")
+        else input_path.with_name(f"pr {input_path.name}")
     )
 
-    with zipfile.ZipFile(args.input, "r") as input_zip:
+    with zipfile.ZipFile(input_path, "r") as input_zip:
         xml_docs, candidates = extract_candidates(
             input_zip=input_zip,
             mode=args.mode,
@@ -458,7 +521,7 @@ def main() -> int:
     )
 
     updated = apply_candidate_updates(candidates)
-    write_output_pptx(args.input, output_path, xml_docs)
+    write_output_pptx(input_path, output_path, xml_docs)
     print(f"Done. Updated {updated} paragraphs. Output: {output_path}")
     return 0
 

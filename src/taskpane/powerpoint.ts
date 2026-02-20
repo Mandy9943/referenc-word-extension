@@ -131,6 +131,12 @@ const CONCLUSION_HEADERS = [
   new RegExp(`^\\s*${NUMBERING_PREFIX}conclusions?\\s+and\\s+recommendations\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
 ];
 
+const REFERENCE_YEAR_PATTERN = /\b(?:19|20)\d{2}[a-z]?\b/;
+const REFERENCE_URL_DOI_PATTERN = /\b(?:https?:\/\/|www\.|doi:\s*|10\.\d{4,9}\/)\S+/i;
+const REFERENCE_CUE_PATTERN = /\b(?:available at|retrieved from|accessed|doi|journal|vol\.?|no\.?|pp\.?|edition|ed\.)\b/i;
+const REFERENCE_AUTHOR_PATTERN = /(?:^|[\s;])(?:[A-Z][a-z]+,\s*(?:[A-Z]\.|[A-Z][a-z]+))/;
+const REFERENCE_LIST_PREFIX_PATTERN = /^\s*(?:\d{1,3}[.)\]]|[-•])\s+/;
+
 type ShapeMeta = {
   slideId: string;
   slideIndex: number;
@@ -174,6 +180,132 @@ function findReferenceStartIndex(metas: ShapeMeta[]): number {
     }
   }
   return -1;
+}
+
+function isReferenceLikeLine(rawLine: string): boolean {
+  const line = rawLine.trim().replace(/\s+/g, " ");
+  if (!line) return false;
+
+  const wordCount = line.split(" ").filter(Boolean).length;
+  if (wordCount < 4) return false;
+
+  const hasYear = REFERENCE_YEAR_PATTERN.test(line);
+  const hasUrlOrDoi = REFERENCE_URL_DOI_PATTERN.test(line);
+  const hasCue = REFERENCE_CUE_PATTERN.test(line);
+  const hasAuthor = REFERENCE_AUTHOR_PATTERN.test(line);
+  const hasListPrefix = REFERENCE_LIST_PREFIX_PATTERN.test(line);
+
+  if (hasUrlOrDoi && (hasYear || hasAuthor || hasListPrefix)) {
+    return true;
+  }
+
+  if (hasYear && (hasAuthor || hasCue || hasListPrefix)) {
+    return true;
+  }
+
+  return false;
+}
+
+function countReferenceLikeLines(text: string): number {
+  if (!text) return 0;
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  let count = 0;
+  for (const line of lines) {
+    if (isReferenceLikeLine(line)) {
+      count++;
+    }
+  }
+  return count;
+}
+
+export function inferReferenceSlideIndexFromSlideTexts(slideTextGroups: string[][]): number {
+  let bestMatch: { slideIndex: number; score: number } | null = null;
+
+  for (let slideIndex = 0; slideIndex < slideTextGroups.length; slideIndex++) {
+    const texts = slideTextGroups[slideIndex];
+    let referenceLineCount = 0;
+    let denseShapeCount = 0;
+    let urlOrDoiShapeCount = 0;
+
+    for (const text of texts) {
+      const lineCount = countReferenceLikeLines(text);
+      referenceLineCount += lineCount;
+      if (lineCount >= 2) {
+        denseShapeCount++;
+      }
+      if (REFERENCE_URL_DOI_PATTERN.test(text)) {
+        urlOrDoiShapeCount++;
+      }
+    }
+
+    const looksLikeReferenceSlide =
+      referenceLineCount >= 4 || denseShapeCount >= 2 || (referenceLineCount >= 3 && urlOrDoiShapeCount >= 1);
+
+    if (!looksLikeReferenceSlide) {
+      continue;
+    }
+
+    const score = referenceLineCount * 3 + denseShapeCount * 5 + urlOrDoiShapeCount * 2;
+    if (!bestMatch || score > bestMatch.score || (score === bestMatch.score && slideIndex > bestMatch.slideIndex)) {
+      bestMatch = { slideIndex, score };
+    }
+  }
+
+  return bestMatch ? bestMatch.slideIndex : -1;
+}
+
+type ReferenceSectionDetection = {
+  mode: "header" | "inferred-slide";
+  referenceStartIndex: number;
+  referenceTailMetas: ShapeMeta[];
+  inferredSlideId?: string;
+};
+
+function detectReferenceSection(metas: ShapeMeta[]): ReferenceSectionDetection | null {
+  const referenceStartIndex = findReferenceStartIndex(metas);
+  if (referenceStartIndex !== -1) {
+    const headerMeta = metas[referenceStartIndex];
+    const previousSameSlideMetas = metas.filter((meta) => meta.slideId === headerMeta.slideId && meta.index < referenceStartIndex);
+    const tailAfterHeader = metas.slice(referenceStartIndex + 1);
+    return {
+      mode: "header",
+      referenceStartIndex,
+      referenceTailMetas: [headerMeta, ...previousSameSlideMetas, ...tailAfterHeader],
+    };
+  }
+
+  const slideBuckets: Array<{ slideId: string; slideIndex: number; metas: ShapeMeta[] }> = [];
+  const slideBucketById = new Map<string, { slideId: string; slideIndex: number; metas: ShapeMeta[] }>();
+
+  for (const meta of metas) {
+    let bucket = slideBucketById.get(meta.slideId);
+    if (!bucket) {
+      bucket = { slideId: meta.slideId, slideIndex: meta.slideIndex, metas: [] };
+      slideBucketById.set(meta.slideId, bucket);
+      slideBuckets.push(bucket);
+    }
+    bucket.metas.push(meta);
+  }
+
+  const inferredSlidePosition = inferReferenceSlideIndexFromSlideTexts(
+    slideBuckets.map((bucket) => bucket.metas.map((meta) => meta.text))
+  );
+  if (inferredSlidePosition === -1) {
+    return null;
+  }
+
+  const inferredSlide = slideBuckets[inferredSlidePosition];
+  const inferredStartIndex = Math.min(...inferredSlide.metas.map((meta) => meta.index));
+  return {
+    mode: "inferred-slide",
+    referenceStartIndex: inferredStartIndex,
+    referenceTailMetas: inferredSlide.metas,
+    inferredSlideId: inferredSlide.slideId,
+  };
 }
 
 function findConclusionRange(
@@ -413,7 +545,7 @@ async function tryLoadShapeText(handle: TextShapeHandle, context: PowerPoint.Req
   const location = describeShape(handle);
 
   try {
-    handle.shape.textFrame.textRange.load("text, font");
+    handle.shape.textFrame.textRange.load("text");
   } catch (error) {
     console.warn(`tryLoadShapeText => unable to queue text load for ${location}`, error);
     return null;
@@ -458,72 +590,45 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
   try {
     return await PowerPoint.run(async (context) => {
       const slides = context.presentation.slides;
-
-      // Load basic properties first to identify shapes with text
-      slides.load("items/id, items/shapes/items/id, items/shapes/items/type");
-      await context.sync();
-
-      for (let slide of slides.items) {
-        for (let shape of slide.shapes.items) {
-          // Only try to load text for shapes that can have text
-          if (TEXT_CAPABLE_SHAPE_TYPES.has(shape.type)) {
-            shape.textFrame.textRange.load("text");
-          }
-        }
-      }
-      await context.sync();
+      const textShapes = await loadTextCapableShapes(context);
 
       const metas: ShapeMeta[] = [];
       let globalIndex = 0;
 
-      // Build metadata
-      for (let i = 0; i < slides.items.length; i++) {
-        const slide = slides.items[i];
-        for (let j = 0; j < slide.shapes.items.length; j++) {
-          const shape = slide.shapes.items[j];
+      for (const handle of textShapes) {
+        const loadedText = await tryLoadShapeText(handle, context);
+        if (!loadedText) continue;
 
-          let text = "";
-          try {
-            text = shape.textFrame.textRange.text;
-          } catch (e) {
-            continue;
-          }
+        const text = loadedText.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+        if (!text) continue;
 
-          text = text.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
-          if (text) {
-            const words = text.split(/\s+/).filter(Boolean);
-            const isTitle = j === 0 && words.length < 10;
+        const words = text.split(/\s+/).filter(Boolean);
+        const isTitle = handle.shapeIndex === 0 && words.length < 10;
 
-            metas.push({
-              slideId: slide.id,
-              slideIndex: i,
-              shapeId: shape.id,
-              shapeIndex: j,
-              shapeType: shape.type,
-              text,
-              wordCount: words.length,
-              isTitle,
-              index: globalIndex++,
-            });
-          }
-        }
+        metas.push({
+          slideId: handle.slide.id,
+          slideIndex: handle.slideIndex,
+          shapeId: handle.shape.id,
+          shapeIndex: handle.shapeIndex,
+          shapeType: handle.shape.type,
+          text,
+          wordCount: words.length,
+          isTitle,
+          index: globalIndex++,
+        });
       }
 
       if (metas.length === 0) {
         return "No text content found in the presentation";
       }
 
-      const referenceStartIndex = findReferenceStartIndex(metas);
-      if (referenceStartIndex === -1) {
+      const referenceDetection = detectReferenceSection(metas);
+      if (!referenceDetection) {
         return "No Reference List section found";
       }
 
-      const headerMeta = metas[referenceStartIndex];
-      const previousSameSlideMetas = metas.filter(
-        (meta) => meta.slideId === headerMeta.slideId && meta.index < referenceStartIndex
-      );
-      const tailAfterHeader = metas.slice(referenceStartIndex + 1);
-      const referenceTailMetas = [headerMeta, ...previousSameSlideMetas, ...tailAfterHeader];
+      const { referenceStartIndex, referenceTailMetas } = referenceDetection;
+      console.log("analyzeDocument => reference detection mode:", referenceDetection.mode);
       console.log(
         "analyzeDocument => reference metas preview:",
         referenceTailMetas.slice(0, 5).map((meta) => ({
@@ -562,7 +667,8 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
 
       // Filter eligible shapes
       const eligibleMetas = metas.filter((meta) => {
-        if (referenceStartIndex !== -1 && meta.index >= referenceStartIndex) return false;
+        if (referenceDetection.mode === "header" && meta.index >= referenceStartIndex) return false;
+        if (referenceDetection.mode === "inferred-slide" && meta.slideId === referenceDetection.inferredSlideId) return false;
         if (
           conclusionHeadingIndex !== -1 &&
           conclusionEndIndex !== -1 &&

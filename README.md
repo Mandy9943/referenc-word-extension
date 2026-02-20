@@ -129,7 +129,13 @@ Basic run:
 npm run pptx:paraphrase -- "/absolute/path/to/input.pptx"
 ```
 
-Output defaults to `input.paraphrased.pptx` next to the original file.
+Shortcut run (auto-detect a single `.pptx` on Desktop):
+
+```bash
+npm run pptx
+```
+
+Output defaults to `pr <input-name>.pptx` next to the original file.
 
 Useful options:
 
@@ -146,6 +152,7 @@ Notes:
 * Use `--no-notes` to paraphrase only slide text.
 * Use `--no-slides` to paraphrase only speaker notes.
 * Use `--dry-run` to inspect eligible paragraph counts without modifying files.
+* If no input path is passed, the script auto-selects the only `.pptx` on Desktop (excluding temporary `~$*.pptx` and generated `pr *.pptx` outputs only when their original source file is also present).
 
 ## Testing & quality
 
