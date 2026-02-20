@@ -312,13 +312,23 @@ function findTOCSectionRange(metas: ParagraphMeta[]): { startIndex: number; endI
   return { startIndex, endIndex };
 }
 
-function findReferenceStartIndex(metas: ParagraphMeta[]): number {
-  for (let i = metas.length - 1; i >= 0; i--) {
-    if (REFERENCE_HEADERS.some((regex) => regex.test(metas[i].text))) {
+export function findReferenceStartIndexFromTexts(paragraphTexts: string[]): number {
+  for (let i = paragraphTexts.length - 1; i >= 0; i--) {
+    const text = (paragraphTexts[i] || "").replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+    if (REFERENCE_HEADERS.some((regex) => regex.test(text))) {
       return i;
     }
   }
+
   return -1;
+}
+
+function findReferenceStartIndex(metas: ParagraphMeta[]): number {
+  return findReferenceStartIndexFromTexts(metas.map((meta) => meta.text));
+}
+
+function isInReferenceSection(paragraphIndex: number, referenceStartIndex: number): boolean {
+  return referenceStartIndex !== -1 && paragraphIndex >= referenceStartIndex;
 }
 
 function findSectionRange(
@@ -739,7 +749,9 @@ export async function removeReferences(): Promise<string> {
       // Build paragraph metadata and find TOC section to skip
       const metas = buildParagraphMeta(paragraphs);
       const tocRange = findTOCSectionRange(metas);
+      const referenceStartIndex = findReferenceStartIndex(metas);
       console.log(`TOC section range: ${tocRange.startIndex} to ${tocRange.endIndex}`);
+      console.log(`Reference section start index: ${referenceStartIndex}`);
 
       // Updated citation patterns to be more precise
       const citationPatterns = [
@@ -763,6 +775,11 @@ export async function removeReferences(): Promise<string> {
       // Process each paragraph
       for (let i = 0; i < paragraphs.items.length; i++) {
         const meta = metas[i];
+
+        if (isInReferenceSection(i, referenceStartIndex)) {
+          console.log(`Skipping reference paragraph ${i + 1}`);
+          continue;
+        }
 
         // Skip TOC section paragraphs
         if (tocRange.startIndex !== -1 && i >= tocRange.startIndex && i <= tocRange.endIndex) {
@@ -834,58 +851,32 @@ export async function removeLinks(deleteAll: boolean = false): Promise<string> {
       // Build paragraph metadata and find TOC section to skip
       const metas = buildParagraphMeta(paragraphs);
       const tocRange = findTOCSectionRange(metas);
+      const referenceStartIndex = deleteAll ? -1 : findReferenceStartIndex(metas);
       console.log(`TOC section range: ${tocRange.startIndex} to ${tocRange.endIndex}`);
-
-      let paragraphsToProcess = paragraphs.items;
-
-      if (!deleteAll) {
-        const paragraphTexts = paragraphs.items.map((p) => p.text);
-
-        const referenceHeaders = [
-          "Reference List",
-          "References List",
-          "References",
-          "REFERENCES LIST",
-          "REFERENCE LIST",
-          "REFERENCES",
-          "Bibliography",
-          "BIBLIOGRAPHY",
-        ];
-
-        // @ts-ignore
-        const lastReferenceListIndex = paragraphTexts.findLastIndex((p) =>
-          referenceHeaders.some((header) => p.includes(header))
-        );
-
-        console.log(`Reference section starts at paragraph index: ${lastReferenceListIndex}`);
-
-        if (lastReferenceListIndex !== -1) {
-          paragraphsToProcess = paragraphs.items.slice(0, lastReferenceListIndex);
-        }
-      }
+      console.log(`Reference section start index: ${referenceStartIndex}`);
 
       // Regex to find URL-like text, using word boundaries to correctly handle trailing punctuation.
       const urlRegex = /\b((https?:\/\/)?[\w.-]+(?:\.[\w.-]+)+)\b/g;
       let linksRemovedCount = 0;
 
-      for (let i = 0; i < paragraphsToProcess.length; i++) {
-        const paragraph = paragraphsToProcess[i];
-        const paragraphIndex = paragraphs.items.indexOf(paragraph);
-        const meta = metas[paragraphIndex];
+      for (let i = 0; i < paragraphs.items.length; i++) {
+        const paragraph = paragraphs.items[i];
+        const meta = metas[i];
+
+        if (!deleteAll && isInReferenceSection(i, referenceStartIndex)) {
+          console.log(`Skipping reference paragraph ${i + 1}`);
+          continue;
+        }
 
         // Skip TOC section paragraphs
-        if (
-          tocRange.startIndex !== -1 &&
-          paragraphIndex >= tocRange.startIndex &&
-          paragraphIndex <= tocRange.endIndex
-        ) {
-          console.log(`Skipping TOC paragraph ${paragraphIndex + 1}`);
+        if (tocRange.startIndex !== -1 && i >= tocRange.startIndex && i <= tocRange.endIndex) {
+          console.log(`Skipping TOC paragraph ${i + 1}`);
           continue;
         }
 
         // Skip individual TOC-like entries
         if (looksLikeTOC(meta.text)) {
-          console.log(`Skipping TOC-like entry at paragraph ${paragraphIndex + 1}`);
+          console.log(`Skipping TOC-like entry at paragraph ${i + 1}`);
           continue;
         }
 
@@ -933,7 +924,9 @@ export async function removeWeirdNumbers(): Promise<string> {
       // Build paragraph metadata and find TOC section to skip
       const metas = buildParagraphMeta(paragraphs);
       const tocRange = findTOCSectionRange(metas);
+      const referenceStartIndex = findReferenceStartIndex(metas);
       console.log(`TOC section range: ${tocRange.startIndex} to ${tocRange.endIndex}`);
+      console.log(`Reference section start index: ${referenceStartIndex}`);
 
       // Regex to find patterns like 【...】 or [...] with the specified format
       const weirdNumberPattern = /[【[]\d+.*?[†+t].*?[】\]]\S*/g;
@@ -942,6 +935,11 @@ export async function removeWeirdNumbers(): Promise<string> {
       for (let i = 0; i < paragraphs.items.length; i++) {
         const paragraph = paragraphs.items[i];
         const meta = metas[i];
+
+        if (isInReferenceSection(i, referenceStartIndex)) {
+          console.log(`Skipping reference paragraph ${i + 1}`);
+          continue;
+        }
 
         // Skip TOC section paragraphs
         if (tocRange.startIndex !== -1 && i >= tocRange.startIndex && i <= tocRange.endIndex) {
@@ -991,12 +989,19 @@ export async function normalizeBodyBold(): Promise<string> {
 
       const metas = buildParagraphMeta(paragraphs);
       const tocRange = findTOCSectionRange(metas);
+      const referenceStartIndex = findReferenceStartIndex(metas);
       console.log(`TOC section range: ${tocRange.startIndex} to ${tocRange.endIndex}`);
+      console.log(`Reference section start index: ${referenceStartIndex}`);
       let updatedCount = 0;
 
       for (const meta of metas) {
         if (!meta.text) continue;
         if (isHeadingOrTitle(meta)) continue;
+
+        if (isInReferenceSection(meta.index, referenceStartIndex)) {
+          console.log(`Skipping reference paragraph ${meta.index + 1}`);
+          continue;
+        }
 
         // Skip TOC section paragraphs
         if (tocRange.startIndex !== -1 && meta.index >= tocRange.startIndex && meta.index <= tocRange.endIndex) {

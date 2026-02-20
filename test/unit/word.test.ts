@@ -1,7 +1,7 @@
 import * as assert from "assert";
 import "mocha";
 import { OfficeMockObject } from "office-addin-mock";
-import { insertText } from "../../src/taskpane/word";
+import { findReferenceStartIndexFromTexts, insertText } from "../../src/taskpane/word";
 
 /* global describe, global, it, Word */
 
@@ -39,5 +39,37 @@ describe("Word", function () {
     await wordMock.context.sync();
 
     assert.strictEqual(wordMock.context.document.body.paragraph.text, "Hello Word");
+  });
+
+  it("Finds numbered references header", function () {
+    const index = findReferenceStartIndexFromTexts([
+      "Introduction",
+      "Body paragraph",
+      "4. References",
+      "Smith, J. (2021).",
+    ]);
+
+    assert.strictEqual(index, 2);
+  });
+
+  it("Uses last references header in document", function () {
+    const index = findReferenceStartIndexFromTexts([
+      "References",
+      "Old list",
+      "Appendix A",
+      "Bibliography",
+      "New list item",
+    ]);
+
+    assert.strictEqual(index, 3);
+  });
+
+  it("Does not match non-header mentions of references", function () {
+    const index = findReferenceStartIndexFromTexts([
+      "This section references prior studies and compares results.",
+      "No bibliography heading here.",
+    ]);
+
+    assert.strictEqual(index, -1);
   });
 });
