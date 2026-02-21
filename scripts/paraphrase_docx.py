@@ -33,6 +33,7 @@ NS = {
 XML_SPACE_ATTR = "{http://www.w3.org/XML/1998/namespace}space"
 
 ZERO_WIDTH_RE = re.compile(r"[\u200B-\u200D\uFEFF]")
+XML_INVALID_CHAR_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
 TRAILING_PUNCTUATION = r"[-:;,.!?-]*"
 NUMBERING_PREFIX = r"(?:(?:\d+(?:\.\d+)*|[IVX]+)\.?\s*)?"
 
@@ -86,6 +87,18 @@ TOC_HEADER_PATTERNS = [
     re.compile(rf"^\s*{NUMBERING_PREFIX}toc\s*{TRAILING_PUNCTUATION}\s*$", re.IGNORECASE),
 ]
 
+CONCLUSION_HEADER_PATTERNS = [
+    re.compile(rf"^\s*{NUMBERING_PREFIX}conclusions?(?:\s+section)?\s*{TRAILING_PUNCTUATION}\s*$", re.IGNORECASE),
+    re.compile(rf"^\s*{NUMBERING_PREFIX}concluding\s+remarks\s*{TRAILING_PUNCTUATION}\s*$", re.IGNORECASE),
+    re.compile(rf"^\s*{NUMBERING_PREFIX}final\s+thoughts\s*{TRAILING_PUNCTUATION}\s*$", re.IGNORECASE),
+    re.compile(rf"^\s*{NUMBERING_PREFIX}summary(?:\s+and\s+future\s+work)?\s*{TRAILING_PUNCTUATION}\s*$", re.IGNORECASE),
+    re.compile(rf"^\s*{NUMBERING_PREFIX}closing\s+remarks\s*{TRAILING_PUNCTUATION}\s*$", re.IGNORECASE),
+    re.compile(
+        rf"^\s*{NUMBERING_PREFIX}conclusions?\s+and\s+recommendations\s*{TRAILING_PUNCTUATION}\s*$",
+        re.IGNORECASE,
+    ),
+]
+
 CITATION_PATTERNS = [
     re.compile(r"\[(?:[^\]]+)[,\s]\s?\d{4}[a-z]?\]"),
     re.compile(r"\((?:[^,()]+(,\s[^,()]+)*(?:,\sand\s[^,()]+)?)[,\s]\s?\d{4}[a-z]?\)"),
@@ -94,8 +107,12 @@ CITATION_PATTERNS = [
     re.compile(r"\((?:[^()]+)\set\sal\.?[,\s]\s?\d{4}[a-z]?\)"),
     re.compile(r"\((?:[^,()]+(,\s[^,()]+)*)[,\s]\s?\d{4}[a-z]?\)"),
 ]
-WEIRD_NUMBER_PATTERN = re.compile(r"[【\[]\d+.*?[†+t].*?[】\]]\S*")
+WEIRD_NUMBER_PATTERNS = [
+    re.compile(r"[【\[]\s*\d{9,}[^\]】]*?[†‡]?\s*[Ll]\d{1,4}(?:\s*[-–—]\s*[Ll]?\d{1,4})?[^\]】]*?[】\]]"),
+    re.compile(r"[【\[]\s*\d{9,}\s*[】\]]"),
+]
 EXISTING_CITATION_RE = re.compile(r"\(\s*[^)]*?\d{4}[a-z]?\s*\)")
+XMLNS_DECLARATION_RE = re.compile(r"""xmlns(?::([A-Za-z_][\w.\-]*))?\s*=\s*(['"])(.*?)\2""")
 
 
 @dataclass
@@ -146,6 +163,11 @@ def qn(tag: str) -> str:
 
 def sanitize_text(text: str) -> str:
     return ZERO_WIDTH_RE.sub("", text or "").strip()
+
+
+def sanitize_xml_text(text: str) -> str:
+    # Word can report "unreadable content" when control chars leak into document.xml.
+    return XML_INVALID_CHAR_RE.sub("", text or "")
 
 
 def normalize_space(text: str) -> str:
@@ -199,6 +221,16 @@ def matches_reference_header(text: str) -> bool:
         return True
     first_line = trimmed.splitlines()[0].strip() if "\n" in trimmed else trimmed
     return any(pattern.match(first_line) for pattern in REFERENCE_HEADER_PATTERNS)
+
+
+def matches_conclusion_header(text: str) -> bool:
+    trimmed = sanitize_text(text)
+    if not trimmed:
+        return False
+    if any(pattern.match(trimmed) for pattern in CONCLUSION_HEADER_PATTERNS):
+        return True
+    first_line = trimmed.splitlines()[0].strip() if "\n" in trimmed else trimmed
+    return any(pattern.match(first_line) for pattern in CONCLUSION_HEADER_PATTERNS)
 
 
 def is_heading_or_subtitle(paragraph: Paragraph) -> bool:
@@ -324,6 +356,72 @@ def detect_reference_section(paragraphs: Sequence[Paragraph]) -> Tuple[int, str]
     return -1, "missing"
 
 
+def find_conclusion_range(paragraphs: Sequence[Paragraph], reference_start_index: int) -> Tuple[int, int]:
+    search_end = reference_start_index if reference_start_index != -1 else len(paragraphs)
+    conclusion_heading_index = -1
+
+    for i in range(search_end - 1, -1, -1):
+        if matches_conclusion_header(paragraphs[i].text):
+            conclusion_heading_index = i
+            break
+
+    if conclusion_heading_index == -1:
+        return -1, -1
+
+    conclusion_end_index = search_end
+    for i in range(conclusion_heading_index + 1, search_end):
+        if matches_conclusion_header(paragraphs[i].text):
+            continue
+        if is_heading_or_subtitle(paragraphs[i]):
+            conclusion_end_index = i
+            break
+
+    return conclusion_heading_index, conclusion_end_index
+
+
+def extract_namespace_declarations(xml_text: str) -> Dict[str, str]:
+    root_match = re.search(r"<([A-Za-z_][\w:.\-]*)([^>]*)>", xml_text)
+    if not root_match:
+        return {}
+
+    attrs = root_match.group(2)
+    declarations: Dict[str, str] = {}
+    for match in XMLNS_DECLARATION_RE.finditer(attrs):
+        prefix = match.group(1) or ""
+        uri = match.group(3)
+        declarations[prefix] = uri
+    return declarations
+
+
+def inject_missing_namespace_declarations(xml_text: str, declarations: Dict[str, str]) -> str:
+    if not declarations:
+        return xml_text
+
+    root_match = re.search(r"<([A-Za-z_][\w:.\-]*)([^>]*)>", xml_text)
+    if not root_match:
+        return xml_text
+
+    root_tag = root_match.group(0)
+    additions: List[str] = []
+    for prefix, uri in declarations.items():
+        if prefix:
+            attr_pattern = rf"""\sxmlns:{re.escape(prefix)}\s*="""
+        else:
+            attr_pattern = r"""\sxmlns\s*="""
+        if re.search(attr_pattern, root_tag):
+            continue
+        if prefix:
+            additions.append(f' xmlns:{prefix}="{uri}"')
+        else:
+            additions.append(f' xmlns="{uri}"')
+
+    if not additions:
+        return xml_text
+
+    updated_root_tag = root_tag[:-1] + "".join(additions) + ">"
+    return xml_text[: root_match.start()] + updated_root_tag + xml_text[root_match.end() :]
+
+
 def choose_account_count(total_words: int) -> int:
     if total_words > 1500:
         return 3
@@ -416,6 +514,140 @@ def post_batch_request(api_url: str, payload: Dict[str, str], timeout_seconds: i
         raise RuntimeError(f"Failed to reach batch API: {err}") from err
 
 
+def extract_account_output(
+    response: Dict[str, object],
+    account_key: str,
+    mode: str,
+    request_label: str,
+) -> str:
+    account_result = response.get(account_key)
+    if not isinstance(account_result, dict):
+        raise RuntimeError(f"Missing response for account {account_key} in {request_label}")
+
+    paraphrased = account_result.get("secondMode") if mode == "dual" else account_result.get("result")
+    if not paraphrased:
+        error_message = account_result.get("error", "missing paraphrased output")
+        raise RuntimeError(f"Account {account_key} failed in {request_label}: {error_message}")
+
+    fallback_used = account_result.get("fallbackUsed")
+    if fallback_used:
+        print(f"[{request_label}] warning: {account_key} used fallback {fallback_used}")
+
+    return str(paraphrased)
+
+
+def recovery_account_order(preferred_account_key: str) -> List[str]:
+    ordered = [preferred_account_key] if preferred_account_key in ACCOUNT_KEYS else []
+    for key in ACCOUNT_KEYS:
+        if key not in ordered:
+            ordered.append(key)
+    return ordered
+
+
+def request_chunk_output_with_fallback(
+    *,
+    preferred_account_key: str,
+    account_items: Sequence[ParaphraseItem],
+    mode: str,
+    api_url: str,
+    timeout_seconds: int,
+    request_label: str,
+) -> str:
+    payload_text = build_batch_payload_text(account_items)
+    errors: List[str] = []
+
+    for key in recovery_account_order(preferred_account_key):
+        try:
+            payload = {"mode": mode, key: payload_text}
+            response = post_batch_request(api_url, payload, timeout_seconds)
+            return extract_account_output(response, key, mode, request_label)
+        except Exception as error:  # pylint: disable=broad-except
+            errors.append(f"{key}: {error}")
+            print(f"[{request_label}] warning: recovery via {key} failed ({error})")
+
+    raise RuntimeError(
+        f"Recovery failed across all accounts for {request_label}: " + " | ".join(errors)
+    )
+
+
+def recover_account_chunk_parts(
+    *,
+    account_key: str,
+    account_items: Sequence[ParaphraseItem],
+    mode: str,
+    api_url: str,
+    timeout_seconds: int,
+    request_label: str,
+    depth: int = 0,
+) -> List[str]:
+    if not account_items:
+        return []
+
+    paraphrased_text = request_chunk_output_with_fallback(
+        preferred_account_key=account_key,
+        account_items=account_items,
+        mode=mode,
+        api_url=api_url,
+        timeout_seconds=timeout_seconds,
+        request_label=f"{request_label}:retry-d{depth}",
+    )
+    parts = parse_paraphrase_parts(paraphrased_text, len(account_items))
+
+    if len(parts) == len(account_items):
+        return parts
+
+    if len(account_items) == 1:
+        single = paraphrased_text.strip()
+        if not single:
+            raise RuntimeError(f"Recovery failed for single paragraph in {request_label}")
+        return [single]
+
+    if depth >= 6:
+        recovered: List[str] = []
+        for idx, item in enumerate(account_items):
+            one = recover_account_chunk_parts(
+                account_key=account_key,
+                account_items=[item],
+                mode=mode,
+                api_url=api_url,
+                timeout_seconds=timeout_seconds,
+                request_label=f"{request_label}:single-{idx}",
+                depth=depth + 1,
+            )
+            recovered.extend(one)
+        return recovered
+
+    midpoint = len(account_items) // 2
+    if midpoint <= 0 or midpoint >= len(account_items):
+        raise RuntimeError(
+            f"Recovery split failed in {request_label}: expected {len(account_items)}, got {len(parts)}"
+        )
+
+    print(
+        f"[{request_label}] warning: delimiter mismatch for {account_key} "
+        f"(expected {len(account_items)}, got {len(parts)}); retrying in smaller batches"
+    )
+    left = recover_account_chunk_parts(
+        account_key=account_key,
+        account_items=account_items[:midpoint],
+        mode=mode,
+        api_url=api_url,
+        timeout_seconds=timeout_seconds,
+        request_label=f"{request_label}:left",
+        depth=depth + 1,
+    )
+    right = recover_account_chunk_parts(
+        account_key=account_key,
+        account_items=account_items[midpoint:],
+        mode=mode,
+        api_url=api_url,
+        timeout_seconds=timeout_seconds,
+        request_label=f"{request_label}:right",
+        depth=depth + 1,
+    )
+    return left + right
+
+
 def get_paragraph_style_id(paragraph: ET.Element) -> str:
     ppr = paragraph.find("w:pPr", NS)
     if ppr is None:
@@ -468,18 +700,12 @@ def collect_paragraphs(document_root: ET.Element) -> List[Paragraph]:
     return paragraphs
 
 
-def set_paragraph_text(paragraph: Paragraph, new_text: str) -> None:
-    text_nodes = paragraph.text_nodes
+def set_text_nodes_value(text_nodes: Sequence[ET.Element], text_value: str) -> None:
     if not text_nodes:
-        run = ET.Element(qn("w:r"))
-        node = ET.Element(qn("w:t"))
-        run.append(node)
-        paragraph.element.append(run)
-        text_nodes = [node]
-        paragraph.text_nodes = text_nodes
+        return
 
-    text_nodes[0].text = new_text
-    if new_text.startswith(" ") or new_text.endswith(" "):
+    text_nodes[0].text = text_value
+    if text_value.startswith(" ") or text_value.endswith(" "):
         text_nodes[0].set(XML_SPACE_ATTR, "preserve")
     elif XML_SPACE_ATTR in text_nodes[0].attrib:
         del text_nodes[0].attrib[XML_SPACE_ATTR]
@@ -489,7 +715,83 @@ def set_paragraph_text(paragraph: Paragraph, new_text: str) -> None:
         if XML_SPACE_ATTR in node.attrib:
             del node.attrib[XML_SPACE_ATTR]
 
-    paragraph.text = sanitize_text(new_text)
+
+def collect_text_nodes_by_break(paragraph_element: ET.Element) -> List[List[ET.Element]]:
+    segments: List[List[ET.Element]] = [[]]
+    br_tag = qn("w:br")
+    cr_tag = qn("w:cr")
+    t_tag = qn("w:t")
+
+    for elem in paragraph_element.iter():
+        if elem.tag == br_tag or elem.tag == cr_tag:
+            segments.append([])
+            continue
+        if elem.tag == t_tag:
+            segments[-1].append(elem)
+
+    return [segment for segment in segments if segment]
+
+
+def split_text_by_target_word_counts(text: str, target_word_counts: Sequence[int]) -> List[str]:
+    segment_count = len(target_word_counts)
+    if segment_count == 0:
+        return []
+    if segment_count == 1:
+        return [text]
+
+    words = [word for word in text.split() if word]
+    if not words:
+        return [""] * segment_count
+
+    total_words = len(words)
+    weights = [max(1, int(count)) for count in target_word_counts]
+    total_weight = sum(weights)
+
+    boundaries: List[int] = []
+    cumulative_weight = 0
+    previous = 0
+    for idx in range(segment_count - 1):
+        cumulative_weight += weights[idx]
+        suggested = round(total_words * cumulative_weight / total_weight)
+        min_allowed = previous + 1
+        max_allowed = total_words - (segment_count - idx - 1)
+        boundary = max(min_allowed, min(suggested, max_allowed))
+        boundaries.append(boundary)
+        previous = boundary
+
+    parts: List[str] = []
+    start = 0
+    for boundary in boundaries:
+        parts.append(" ".join(words[start:boundary]).strip())
+        start = boundary
+    parts.append(" ".join(words[start:]).strip())
+    return parts
+
+
+def set_paragraph_text(paragraph: Paragraph, new_text: str) -> None:
+    safe_text = sanitize_xml_text(new_text)
+    text_nodes = paragraph.text_nodes
+    if not text_nodes:
+        run = ET.Element(qn("w:r"))
+        node = ET.Element(qn("w:t"))
+        run.append(node)
+        paragraph.element.append(run)
+        text_nodes = [node]
+        paragraph.text_nodes = text_nodes
+
+    nodes_by_break_segment = collect_text_nodes_by_break(paragraph.element)
+    if len(nodes_by_break_segment) > 1:
+        original_segment_word_counts = [
+            count_words("".join(node.text or "" for node in segment_nodes))
+            for segment_nodes in nodes_by_break_segment
+        ]
+        segment_texts = split_text_by_target_word_counts(safe_text, original_segment_word_counts)
+        for segment_nodes, segment_text in zip(nodes_by_break_segment, segment_texts):
+            set_text_nodes_value(segment_nodes, segment_text)
+    else:
+        set_text_nodes_value(text_nodes, safe_text)
+
+    paragraph.text = sanitize_text(safe_text)
     paragraph.word_count = count_words(paragraph.text)
 
 
@@ -504,10 +806,11 @@ def remove_citations_and_weird_tokens(text: str) -> Tuple[str, int, int]:
             removed_citations += len(matches)
             updated = pattern.sub("", updated)
 
-    weird_matches = list(WEIRD_NUMBER_PATTERN.finditer(updated))
-    if weird_matches:
-        removed_weird += len(weird_matches)
-        updated = WEIRD_NUMBER_PATTERN.sub("", updated)
+    for pattern in WEIRD_NUMBER_PATTERNS:
+        weird_matches = list(pattern.finditer(updated))
+        if weird_matches:
+            removed_weird += len(weird_matches)
+            updated = pattern.sub("", updated)
 
     updated = re.sub(r"\s+\.", ".", updated)
     updated = re.sub(r"\s+([,;:])", r"\1", updated)
@@ -521,18 +824,12 @@ def run_step_1_clean(paragraphs: Sequence[Paragraph], reference_start_index: int
     removed_citations = 0
     removed_weird_numbers = 0
 
-    toc_start = -1
-    for p in paragraphs:
-        if any(pattern.match(p.text) for pattern in TOC_HEADER_PATTERNS):
-            toc_start = p.index
-            break
-
     for p in paragraphs:
         if not p.text:
             continue
         if reference_start_index != -1 and p.index >= reference_start_index:
             continue
-        if toc_start != -1 and p.index >= toc_start and (looks_like_toc_line(p.text) or p.word_count <= 8):
+        if any(pattern.match(p.text) for pattern in TOC_HEADER_PATTERNS):
             continue
         if looks_like_toc_line(p.text):
             continue
@@ -583,7 +880,6 @@ def run_step_2_paraphrase(
     updated_count = 0
     cursor = 0
     total_words = sum(item.word_count for item in items)
-
     paragraph_by_index = {p.index: p for p in paragraphs}
 
     while cursor < len(items):
@@ -602,27 +898,36 @@ def run_step_2_paraphrase(
         response = post_batch_request(api_url, payload, timeout_seconds)
 
         for account_key, account_items in account_chunks:
-            account_result = response.get(account_key)
-            if not isinstance(account_result, dict):
-                raise RuntimeError(f"Missing response for account {account_key} in request {request_count}.")
+            request_label = f"request {request_count} {account_key}"
+            try:
+                paraphrased = extract_account_output(response, account_key, mode, f"request {request_count}")
+                parts = parse_paraphrase_parts(paraphrased, len(account_items))
+            except Exception as error:  # pylint: disable=broad-except
+                print(f"[{request_label}] warning: initial chunk failed ({error}); retrying with recovery")
+                parts = []
 
-            paraphrased_text = account_result.get("secondMode") if mode == "dual" else account_result.get("result")
-            if not paraphrased_text:
-                error_message = account_result.get("error", "missing paraphrased output")
-                raise RuntimeError(f"Account {account_key} failed in request {request_count}: {error_message}")
+            if len(parts) != len(account_items):
+                parts = recover_account_chunk_parts(
+                    account_key=account_key,
+                    account_items=account_items,
+                    mode=mode,
+                    api_url=api_url,
+                    timeout_seconds=timeout_seconds,
+                    request_label=request_label,
+                )
 
-            parts = parse_paraphrase_parts(str(paraphrased_text), len(account_items))
             if len(parts) != len(account_items):
                 raise RuntimeError(
-                    f"Paraphrase count mismatch in request {request_count}, account {account_key}: "
-                    f"expected {len(account_items)}, got {len(parts)}."
+                    f"Response count mismatch in {request_label}: "
+                    f"expected {len(account_items)}, got {len(parts)} after recovery"
                 )
 
             for item, new_text in zip(account_items, parts):
                 paragraph = paragraph_by_index.get(item.paragraph_index)
                 if paragraph is None:
                     continue
-                set_paragraph_text(paragraph, new_text.strip())
+                single_paragraph_text = re.sub(r"\s*\n+\s*", " ", str(new_text)).strip()
+                set_paragraph_text(paragraph, single_paragraph_text)
                 updated_count += 1
 
     return Step2Stats(
@@ -746,6 +1051,7 @@ def run_step_3_add_references(paragraphs: Sequence[Paragraph]) -> Step3Stats:
             "Could not detect a reference section. No in-text references were added. "
             "Please verify the document has a references/reference list section."
         )
+    conclusion_heading_index, conclusion_end_index = find_conclusion_range(paragraphs, reference_start_index)
 
     references = extract_reference_entries(paragraphs, reference_start_index)
     if not references:
@@ -764,6 +1070,12 @@ def run_step_3_add_references(paragraphs: Sequence[Paragraph]) -> Step3Stats:
         if not p.text:
             continue
         if p.index >= reference_start_index:
+            continue
+        if (
+            conclusion_heading_index != -1
+            and p.index > conclusion_heading_index
+            and (conclusion_end_index == -1 or p.index < conclusion_end_index)
+        ):
             continue
         if p.index == first_non_empty_index:
             continue
@@ -808,11 +1120,18 @@ def run_step_3_add_references(paragraphs: Sequence[Paragraph]) -> Step3Stats:
     )
 
 
-def write_output_docx(input_path: Path, output_path: Path, document_root: ET.Element) -> None:
+def write_output_docx(
+    input_path: Path,
+    output_path: Path,
+    document_root: ET.Element,
+    namespace_declarations: Optional[Dict[str, str]] = None,
+) -> None:
     with zipfile.ZipFile(input_path, "r") as source_zip, zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as out_zip:
         for info in source_zip.infolist():
             if info.filename == "word/document.xml":
-                xml_bytes = ET.tostring(document_root, encoding="utf-8", xml_declaration=True)
+                xml_text = ET.tostring(document_root, encoding="utf-8", xml_declaration=True).decode("utf-8")
+                xml_text = inject_missing_namespace_declarations(xml_text, namespace_declarations or {})
+                xml_bytes = xml_text.encode("utf-8")
                 out_zip.writestr(info, xml_bytes)
             else:
                 out_zip.writestr(info, source_zip.read(info.filename))
@@ -962,13 +1281,18 @@ def main() -> int:
         return 1
 
     output_path = args.output if args.output else input_path.with_name(f"pr {input_path.name}")
+    namespace_declarations: Dict[str, str] = {}
 
     try:
         with zipfile.ZipFile(input_path, "r") as input_zip:
             if "word/document.xml" not in input_zip.namelist():
                 print("Invalid DOCX: missing word/document.xml", file=sys.stderr)
                 return 1
-            root = ET.fromstring(input_zip.read("word/document.xml"))
+            document_xml_bytes = input_zip.read("word/document.xml")
+            namespace_declarations = extract_namespace_declarations(
+                document_xml_bytes.decode("utf-8", errors="replace")
+            )
+            root = ET.fromstring(document_xml_bytes)
     except Exception as error:  # pylint: disable=broad-except
         print(f"Failed to read DOCX: {error}", file=sys.stderr)
         return 1
@@ -1068,7 +1392,7 @@ def main() -> int:
         if args.dry_run:
             print("[4/4] DRY-RUN OK | no file written")
         else:
-            write_output_docx(input_path, output_path, root)
+            write_output_docx(input_path, output_path, root, namespace_declarations)
             print(f"[4/4] OK | output={output_path}")
     except Exception as error:  # pylint: disable=broad-except
         print(f"[4/4] FAILED: {error}", file=sys.stderr)

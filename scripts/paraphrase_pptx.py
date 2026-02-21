@@ -89,6 +89,11 @@ CITATION_PATTERNS = [
 ]
 WEIRD_NUMBER_PATTERN = re.compile(r"[【\[]\d+.*?[†+t].*?[】\]]\S*")
 EXISTING_CITATION_RE = re.compile(r"\(\s*[^)]*?\d{4}[a-z]?\s*\)")
+LINK_PATTERNS = [
+    re.compile(r"\bhttps?://[^\s)\]}]+", re.IGNORECASE),
+    re.compile(r"\bwww\.[^\s)\]}]+", re.IGNORECASE),
+    re.compile(r"\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/[^\s)\]}]*)?", re.IGNORECASE),
+]
 
 ParagraphKey = Tuple[str, int]
 
@@ -118,6 +123,7 @@ class ReferenceDetection:
 class Step1Stats:
     cleaned_paragraphs: int
     removed_citations: int
+    removed_links: int
     removed_weird_numbers: int
 
 
@@ -366,9 +372,10 @@ def inject_citation_into_paragraph(text: str, citation: str) -> Tuple[str, bool]
     return reconstructed, reconstructed != text
 
 
-def remove_citations_and_weird_tokens(text: str) -> Tuple[str, int, int]:
+def remove_citations_links_and_weird_tokens(text: str) -> Tuple[str, int, int, int]:
     updated = text
     removed_citations = 0
+    removed_links = 0
     removed_weird = 0
 
     for pattern in CITATION_PATTERNS:
@@ -377,16 +384,23 @@ def remove_citations_and_weird_tokens(text: str) -> Tuple[str, int, int]:
             removed_citations += len(matches)
             updated = pattern.sub("", updated)
 
+    for pattern in LINK_PATTERNS:
+        matches = list(pattern.finditer(updated))
+        if matches:
+            removed_links += len(matches)
+            updated = pattern.sub("", updated)
+
     weird_matches = list(WEIRD_NUMBER_PATTERN.finditer(updated))
     if weird_matches:
         removed_weird += len(weird_matches)
         updated = WEIRD_NUMBER_PATTERN.sub("", updated)
 
+    updated = re.sub(r"\(\s*\)", "", updated)
     updated = re.sub(r"\s+\.", ".", updated)
     updated = re.sub(r"\s+([,;:])", r"\1", updated)
     updated = re.sub(r"\s{2,}", " ", updated).strip()
 
-    return updated, removed_citations, removed_weird
+    return updated, removed_citations, removed_links, removed_weird
 
 
 def choose_account_count(total_words: int) -> int:
@@ -691,6 +705,7 @@ def set_paragraph_text(paragraph: PptParagraph, new_text: str) -> None:
 def run_step_1_clean(paragraphs: Sequence[PptParagraph], reference_keys: Set[ParagraphKey]) -> Step1Stats:
     cleaned_paragraphs = 0
     removed_citations = 0
+    removed_links = 0
     removed_weird_numbers = 0
 
     for paragraph in paragraphs:
@@ -701,8 +716,9 @@ def run_step_1_clean(paragraphs: Sequence[PptParagraph], reference_keys: Set[Par
         if is_heading_or_subtitle(paragraph):
             continue
 
-        new_text, citation_count, weird_count = remove_citations_and_weird_tokens(paragraph.text)
+        new_text, citation_count, link_count, weird_count = remove_citations_links_and_weird_tokens(paragraph.text)
         removed_citations += citation_count
+        removed_links += link_count
         removed_weird_numbers += weird_count
         if new_text != paragraph.text:
             set_paragraph_text(paragraph, new_text)
@@ -711,6 +727,7 @@ def run_step_1_clean(paragraphs: Sequence[PptParagraph], reference_keys: Set[Par
     return Step1Stats(
         cleaned_paragraphs=cleaned_paragraphs,
         removed_citations=removed_citations,
+        removed_links=removed_links,
         removed_weird_numbers=removed_weird_numbers,
     )
 
@@ -1162,13 +1179,14 @@ def main() -> int:
             f"reference_paragraphs={len(initial_detection.reference_keys)}"
         )
 
-    print("[1/4] Clean (weird numbers + in-text citations, keep headings/subtitles) ...", flush=True)
+    print("[1/4] Clean (weird numbers + links + in-text citations, keep headings/subtitles) ...", flush=True)
     try:
         step1 = run_step_1_clean(paragraphs, reference_keys)
         print(
             "[1/4] OK"
             f" | updated_paragraphs={step1.cleaned_paragraphs}"
             f", removed_citations={step1.removed_citations}"
+            f", removed_links={step1.removed_links}"
             f", removed_weird_numbers={step1.removed_weird_numbers}"
         )
     except Exception as error:  # pylint: disable=broad-except
