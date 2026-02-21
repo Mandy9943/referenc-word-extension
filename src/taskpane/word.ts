@@ -815,8 +815,9 @@ export async function removeReferences(): Promise<string> {
           if (matches.length > 0) {
             console.log(`Found matches with pattern ${pattern}:`, matches);
 
-            // Remove all matches and clean up extra spaces before periods
-            text = text.replace(pattern, "").replace(/\s+\./g, ".");
+            // Remove all matches and clean up extra spaces before periods.
+            // Use space/tab-only cleanup so line/paragraph separators are never collapsed.
+            text = text.replace(pattern, "").replace(/[ \t]+\./g, ".");
             hadMatch = true;
             totalRemoved += matches.length;
           }
@@ -896,7 +897,8 @@ export async function removeLinks(deleteAll: boolean = false): Promise<string> {
         if (matches) {
           linksRemovedCount += matches.length;
           // Replace URL-like text and clean up spaces before punctuation.
-          const newText = originalText.replace(urlRegex, "").replace(/\s+([.,;])/g, "$1");
+          // Use space/tab-only cleanup so line/paragraph separators are never collapsed.
+          const newText = originalText.replace(urlRegex, "").replace(/[ \t]+([.,;])/g, "$1");
           // Replace only paragraph content (not paragraph mark) to preserve boundaries.
           paragraph.getRange(Word.RangeLocation.content).insertText(newText, Word.InsertLocation.replace);
           paragraph.font.bold = false;
@@ -969,8 +971,9 @@ export async function removeWeirdNumbers(): Promise<string> {
 
         if (matches && matches.length > 0) {
           totalRemoved += matches.length;
-          // Replace the weird numbers and clean up potential double spaces.
-          const newText = originalText.replace(weirdNumberPattern, "").replace(/\s{2,}/g, " ");
+          // Replace weird markers and normalize repeated spaces/tabs only.
+          // Do not normalize newlines/vertical tabs to avoid visual paragraph merges.
+          const newText = originalText.replace(weirdNumberPattern, "").replace(/[ \t]{2,}/g, " ");
           // Replace only paragraph content (not paragraph mark) to preserve boundaries.
           paragraph.getRange(Word.RangeLocation.content).insertText(newText, Word.InsertLocation.replace);
           paragraph.font.bold = false;
