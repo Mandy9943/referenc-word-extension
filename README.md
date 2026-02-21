@@ -10,10 +10,11 @@ Essay Manager is a Word and PowerPoint task pane add‑in that helps writers cle
 4. [External services & configuration](#external-services--configuration)
 5. [Getting started](#getting-started)
 6. [Everyday usage](#everyday-usage)
-7. [Bulk PPTX automation](#bulk-pptx-automation)
-8. [Testing & quality](#testing--quality)
-9. [Troubleshooting & tips](#troubleshooting--tips)
-10. [Contributing & license](#contributing--license)
+7. [Bulk DOCX automation](#bulk-docx-automation)
+8. [Bulk PPTX automation](#bulk-pptx-automation)
+9. [Testing & quality](#testing--quality)
+10. [Troubleshooting & tips](#troubleshooting--tips)
+11. [Contributing & license](#contributing--license)
 
 ## Key capabilities
 
@@ -118,6 +119,43 @@ GEMINI_API_KEY=AIza...
 * All Word mutations happen within a single `Word.run` batch to keep context state consistent.
 * PowerPoint text updates re-load each `textFrame.textRange` to avoid stale object errors.
 * The `Clean` pipeline is intentionally sequential: removing citations first prevents dangling periods before URL removal and weird-number cleanup.
+
+## Bulk DOCX automation
+
+For one-command DOCX processing, use the offline script pipeline. It enforces the exact sequence:
+
+1. Clean weird artifacts + existing in-text citations (without touching headings/subtitles)
+2. Paraphrase body content (`SIMPLE+SHORT` by default)
+3. Detect reference section and insert new in-text references
+4. Write output as `pr <original-name>.docx`
+
+Commands:
+
+```bash
+# SIMPLE+SHORT mode
+npm run doc
+
+# STANDARD mode
+npm run doc standard
+```
+
+Input behavior:
+
+* If no file path is passed, the script auto-selects a single `.docx` on Desktop.
+* It ignores temporary Word lock files (`~$*.docx`) and generated `pr *.docx` outputs when the original source file is also present.
+
+Output behavior:
+
+* Default output is `pr <input-name>.docx` in the same folder as the input file.
+* If references cannot be detected or inserted, the script exits with a terminal error and does **not** write an output file.
+
+Useful options:
+
+```bash
+python3 scripts/paraphrase_docx.py --mode dual "/path/in.docx"
+python3 scripts/paraphrase_docx.py --mode standard "/path/in.docx"
+python3 scripts/paraphrase_docx.py standard "/path/in.docx" --dry-run
+```
 
 ## Bulk PPTX automation
 

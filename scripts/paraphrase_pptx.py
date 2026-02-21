@@ -161,6 +161,149 @@ def post_batch_request(api_url: str, payload: Dict[str, str], timeout_seconds: i
         raise RuntimeError(f"Failed to reach batch API: {err}") from err
 
 
+def extract_account_output(
+    response: Dict[str, object],
+    account_key: str,
+    mode: str,
+    request_label: str,
+) -> str:
+    account_result = response.get(account_key)
+    if not isinstance(account_result, dict):
+        raise RuntimeError(f"Missing response for account {account_key} in {request_label}")
+
+    if mode == "dual":
+        paraphrased = account_result.get("secondMode")
+    else:
+        paraphrased = account_result.get("result")
+
+    if not paraphrased:
+        error_message = account_result.get("error", "missing paraphrased output")
+        raise RuntimeError(f"Account {account_key} failed in {request_label}: {error_message}")
+
+    fallback_used = account_result.get("fallbackUsed")
+    if fallback_used:
+        print(f"[{request_label}] warning: {account_key} used fallback {fallback_used}")
+
+    return str(paraphrased)
+
+
+def recover_account_chunk_parts(
+    *,
+    account_key: str,
+    account_items: Sequence[Candidate],
+    mode: str,
+    api_url: str,
+    timeout_seconds: int,
+    request_label: str,
+    depth: int = 0,
+) -> List[str]:
+    """
+    Retry a problematic account chunk by recursively splitting it into smaller batches.
+    This prevents one bad delimiter parse from failing the full PPTX run.
+    """
+    if not account_items:
+        return []
+
+    paraphrased_text = request_chunk_output_with_fallback(
+        preferred_account_key=account_key,
+        account_items=account_items,
+        mode=mode,
+        api_url=api_url,
+        timeout_seconds=timeout_seconds,
+        request_label=f"{request_label}:retry-d{depth}",
+    )
+    parts = parse_paraphrase_parts(paraphrased_text, len(account_items))
+
+    if len(parts) == len(account_items):
+        return parts
+
+    if len(account_items) == 1:
+        single = paraphrased_text.strip()
+        if not single:
+            raise RuntimeError(f"Recovery failed for single paragraph in {request_label}")
+        return [single]
+
+    if depth >= 6:
+        # Hard stop for recursion depth: fall back to one-by-one requests.
+        recovered: List[str] = []
+        for idx, item in enumerate(account_items):
+            one = recover_account_chunk_parts(
+                account_key=account_key,
+                account_items=[item],
+                mode=mode,
+                api_url=api_url,
+                timeout_seconds=timeout_seconds,
+                request_label=f"{request_label}:single-{idx}",
+                depth=depth + 1,
+            )
+            recovered.extend(one)
+        return recovered
+
+    midpoint = len(account_items) // 2
+    if midpoint <= 0 or midpoint >= len(account_items):
+        raise RuntimeError(
+            f"Recovery split failed in {request_label}: expected {len(account_items)}, got {len(parts)}"
+        )
+
+    print(
+        f"[{request_label}] warning: delimiter mismatch for {account_key} "
+        f"(expected {len(account_items)}, got {len(parts)}); retrying in smaller batches"
+    )
+    left = recover_account_chunk_parts(
+        account_key=account_key,
+        account_items=account_items[:midpoint],
+        mode=mode,
+        api_url=api_url,
+        timeout_seconds=timeout_seconds,
+        request_label=f"{request_label}:left",
+        depth=depth + 1,
+    )
+    right = recover_account_chunk_parts(
+        account_key=account_key,
+        account_items=account_items[midpoint:],
+        mode=mode,
+        api_url=api_url,
+        timeout_seconds=timeout_seconds,
+        request_label=f"{request_label}:right",
+        depth=depth + 1,
+    )
+    return left + right
+
+
+def recovery_account_order(preferred_account_key: str) -> List[str]:
+    ordered = [preferred_account_key] if preferred_account_key in ACCOUNT_KEYS else []
+    for key in ACCOUNT_KEYS:
+        if key not in ordered:
+            ordered.append(key)
+    return ordered
+
+
+def request_chunk_output_with_fallback(
+    *,
+    preferred_account_key: str,
+    account_items: Sequence[Candidate],
+    mode: str,
+    api_url: str,
+    timeout_seconds: int,
+    request_label: str,
+) -> str:
+    payload_text = build_payload_text(account_items)
+    errors: List[str] = []
+
+    for key in recovery_account_order(preferred_account_key):
+        try:
+            payload = {"mode": mode, key: payload_text}
+            response = post_batch_request(api_url, payload, timeout_seconds)
+            return extract_account_output(response, key, mode, request_label)
+        except Exception as error:  # pylint: disable=broad-except
+            errors.append(f"{key}: {error}")
+            print(f"[{request_label}] warning: recovery via {key} failed ({error})")
+
+    raise RuntimeError(
+        f"Recovery failed across all accounts for {request_label}: " + " | ".join(errors)
+    )
+
+
 def sorted_target_xml_paths(
     names: Iterable[str], include_slides: bool, include_notes: bool
 ) -> List[Tuple[str, str, int]]:
@@ -291,34 +434,31 @@ def paraphrase_candidates(
         response = post_batch_request(api_url, payload, timeout_seconds)
 
         for account_key, account_items in account_chunks:
-            account_result = response.get(account_key)
-            if not isinstance(account_result, dict):
-                raise RuntimeError(f"Missing response for account {account_key} in request {request_index}")
+            request_label = f"request {request_index} {account_key}"
+            try:
+                paraphrased = extract_account_output(response, account_key, mode, f"request {request_index}")
+                parts = parse_paraphrase_parts(paraphrased, len(account_items))
+            except Exception as error:  # pylint: disable=broad-except
+                print(f"[{request_label}] warning: initial chunk failed ({error}); retrying with recovery")
+                parts = []
 
-            if mode == "dual":
-                paraphrased = account_result.get("secondMode")
-            else:
-                paraphrased = account_result.get("result")
-
-            if not paraphrased:
-                error_message = account_result.get("error", "missing paraphrased output")
-                raise RuntimeError(f"Account {account_key} failed in request {request_index}: {error_message}")
-
-            parts = parse_paraphrase_parts(str(paraphrased), len(account_items))
+            if len(parts) != len(account_items):
+                parts = recover_account_chunk_parts(
+                    account_key=account_key,
+                    account_items=account_items,
+                    mode=mode,
+                    api_url=api_url,
+                    timeout_seconds=timeout_seconds,
+                    request_label=request_label,
+                )
             if len(parts) != len(account_items):
                 raise RuntimeError(
-                    f"Response count mismatch in request {request_index} account {account_key}: "
-                    f"expected {len(account_items)}, got {len(parts)}"
+                    f"Response count mismatch in {request_label}: "
+                    f"expected {len(account_items)}, got {len(parts)} after recovery"
                 )
 
             for candidate, new_text in zip(account_items, parts):
                 candidate.paraphrased_text = new_text.strip()
-
-            if account_result.get("fallbackUsed"):
-                print(
-                    f"[request {request_index}] warning: {account_key} used fallback "
-                    f"{account_result['fallbackUsed']}"
-                )
 
 
 def apply_candidate_updates(candidates: Sequence[Candidate]) -> int:
