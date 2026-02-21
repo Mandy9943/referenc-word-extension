@@ -460,13 +460,13 @@ function getSentenceSlotsForParagraph(paragraphIndex: number, sentenceRanges: Wo
     slots.push({ paragraphIndex, sentenceIndex: i });
   }
 
-  // Limit per paragraph: 1–3 sentences max, chosen randomly
+  // Safety rule: at most one sentence per paragraph.
+  // This avoids multi-range mutations inside the same paragraph, which can destabilize
+  // Word range anchors and occasionally collapse visual paragraph boundaries.
   if (slots.length <= 1) return slots;
 
   shuffleInPlace(slots);
-  const maxForParagraph = Math.min(3, slots.length);
-  const targetCount = 1 + Math.floor(Math.random() * maxForParagraph);
-  return slots.slice(0, targetCount);
+  return [slots[0]];
 }
 
 function appendCitationAtSentenceEnd(sentence: string, citation: string): string {
@@ -668,7 +668,8 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
 
       for (const pIndex of targetIndexes) {
         const paragraph = paragraphs.items[pIndex];
-        const ranges = paragraph.getTextRanges([".", "?", "!"], true);
+        // Build sentence ranges from paragraph content only (exclude paragraph mark).
+        const ranges = paragraph.getRange(Word.RangeLocation.content).getTextRanges([".", "?", "!"], true);
         ranges.load("text");
         sentenceRangeByParagraph[pIndex] = ranges;
       }
@@ -701,7 +702,15 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
           referenceIndex = Math.floor(Math.random() * references.length);
         }
 
+        // Guardrail: never edit ranges that include line/paragraph separators.
         const currentText = sentenceRange.text || "";
+        if (/[\r\n\u000B\u000C]/.test(currentText)) {
+          console.log("analyzeDocument => skipping unsafe boundary sentence range", {
+            paragraphIndex: slot.paragraphIndex,
+            sentenceIndex: slot.sentenceIndex,
+          });
+          continue;
+        }
         const citation = references[referenceIndex];
         const newText = appendCitationAtSentenceEnd(currentText, citation);
 
@@ -711,7 +720,8 @@ export async function analyzeDocument(insertEveryOther: boolean = false): Promis
           referenceIndex,
         });
 
-        sentenceRange.insertText(newText, Word.InsertLocation.replace);
+        // Replace content-only range to avoid touching paragraph boundaries.
+        sentenceRange.getRange(Word.RangeLocation.content).insertText(newText, Word.InsertLocation.replace);
       }
 
       await context.sync();
