@@ -8,8 +8,10 @@ import {
   normalizeBoldText,
   ParaphraseResult,
   paraphraseAllSlides,
+  paraphraseAllSlidesLudicrous,
   paraphraseAllSlidesStandard,
   paraphraseSelectedText,
+  paraphraseSelectedTextLudicrous,
   paraphraseSelectedTextStandard,
   removeLinks,
   removeReferences,
@@ -246,12 +248,20 @@ const App: React.FC = () => {
     await runParaphraseAction(paraphraseSelectedTextStandard);
   };
 
+  const handleParaphraseTextLudicrous = async () => {
+    await runParaphraseAction(paraphraseSelectedTextLudicrous);
+  };
+
   const handleParaphraseAllSlides = async () => {
     await runParaphraseAction(paraphraseAllSlides);
   };
 
   const handleParaphraseAllSlidesStandard = async () => {
     await runParaphraseAction(paraphraseAllSlidesStandard);
+  };
+
+  const handleParaphraseAllSlidesLudicrous = async () => {
+    await runParaphraseAction(paraphraseAllSlidesLudicrous);
   };
 
   const handleRestartAccount = async () => {
@@ -432,6 +442,15 @@ const App: React.FC = () => {
             >
               STANDARD
             </Button>
+            <Button
+              appearance="secondary"
+              onClick={handleParaphraseTextLudicrous}
+              disabled={status === "loading"}
+              className={styles.button}
+              style={{ backgroundColor: "#d67f2dff", color: "#fff" }}
+            >
+              FAST (LUDICROUS)
+            </Button>
             {hostType === Office.HostType.PowerPoint && (
               <>
                 <Button
@@ -452,6 +471,15 @@ const App: React.FC = () => {
                 >
                   ALL SLIDES (STANDARD)
                 </Button>
+                <Button
+                  appearance="secondary"
+                  onClick={handleParaphraseAllSlidesLudicrous}
+                  disabled={status === "loading"}
+                  className={styles.button}
+                  style={{ backgroundColor: "#b7621bff", color: "#fff" }}
+                >
+                  ALL SLIDES (LUDICROUS)
+                </Button>
               </>
             )}
             {hostType === Office.HostType.PowerPoint && (
@@ -464,7 +492,8 @@ const App: React.FC = () => {
                   marginTop: "-8px",
                 }}
               >
-                PowerPoint tip: click in Speaker Notes and press Cmd/Ctrl+A, then click SIMPLE + SHORT or STANDARD.
+                PowerPoint tip: click in Speaker Notes and press Cmd/Ctrl+A, then click SIMPLE + SHORT, STANDARD, or
+                FAST (LUDICROUS).
                 <br />
                 One-click ALL SLIDES currently paraphrases slide text boxes in bulk.
               </Text>

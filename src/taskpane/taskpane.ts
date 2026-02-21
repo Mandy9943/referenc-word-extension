@@ -5,10 +5,12 @@ import {
   analyzeDocument as analyzeDocumentInPowerPoint,
   insertText as insertTextInPowerPoint,
   normalizeBodyBold as normalizeBodyBoldInPowerPoint,
+  paraphraseDocumentLudicrous as paraphraseDocumentLudicrousInPowerPoint,
   paraphraseAllSlides as paraphraseAllSlidesInPowerPoint,
   paraphraseDocument as paraphraseDocumentInPowerPoint,
   paraphraseDocumentStandard,
   paraphraseSelectedText as paraphraseSelectedTextInPowerPointSelection,
+  paraphraseSelectedTextLudicrous as paraphraseSelectedTextLudicrousInPowerPointSelection,
   paraphraseSelectedTextStandard as paraphraseSelectedTextStandardInPowerPointSelection,
   removeLinks as removeLinksInPowerPoint,
   removeReferences as removeReferencesInPowerPoint,
@@ -21,6 +23,7 @@ import {
   insertText as insertTextInWord,
   normalizeBodyBold as normalizeBodyBoldInWord,
   paraphraseDocument as paraphraseDocumentInWord,
+  paraphraseDocumentLudicrous as paraphraseDocumentLudicrousInWord,
   paraphraseDocumentStandard as paraphraseDocumentStandardInWord,
   ParaphraseResult,
   removeLinks as removeLinksInWord,
@@ -149,6 +152,26 @@ export async function paraphraseSelectedTextStandard(): Promise<ParaphraseResult
   }
 }
 
+export async function paraphraseSelectedTextLudicrous(): Promise<ParaphraseResult> {
+  await Office.onReady();
+  switch (Office.context.host) {
+    case Office.HostType.Word:
+      return await paraphraseDocumentLudicrousInWord();
+    case Office.HostType.PowerPoint: {
+      try {
+        return await paraphraseSelectedTextLudicrousInPowerPointSelection();
+      } catch (error) {
+        if (shouldFallbackToSlideParaphrase(error)) {
+          return await paraphraseDocumentLudicrousInPowerPoint();
+        }
+        throw error;
+      }
+    }
+    default:
+      throw new Error("This function is only available in Word and PowerPoint");
+  }
+}
+
 export async function paraphraseAllSlides(): Promise<ParaphraseResult> {
   await Office.onReady();
   switch (Office.context.host) {
@@ -164,6 +187,16 @@ export async function paraphraseAllSlidesStandard(): Promise<ParaphraseResult> {
   switch (Office.context.host) {
     case Office.HostType.PowerPoint:
       return await paraphraseAllSlidesInPowerPoint("standard");
+    default:
+      throw new Error("This function is only available in PowerPoint");
+  }
+}
+
+export async function paraphraseAllSlidesLudicrous(): Promise<ParaphraseResult> {
+  await Office.onReady();
+  switch (Office.context.host) {
+    case Office.HostType.PowerPoint:
+      return await paraphraseAllSlidesInPowerPoint("ludicrous");
     default:
       throw new Error("This function is only available in PowerPoint");
   }

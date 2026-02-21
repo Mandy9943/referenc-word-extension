@@ -11,6 +11,7 @@ const HEALTH_CHECK_TIMEOUT = 2000; // 2 seconds
 const ACCOUNT_KEYS = ["acc1", "acc2", "acc3"] as const;
 
 type AccountKey = (typeof ACCOUNT_KEYS)[number];
+type SinglePassMode = "standard" | "ludicrous";
 
 interface HealthCheckResponse {
   status: string;
@@ -1346,10 +1347,11 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
   }
 }
 
-export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
+async function paraphraseDocumentSinglePass(mode: SinglePassMode): Promise<ParaphraseResult> {
   try {
     return await PowerPoint.run(async (context) => {
-      console.log("paraphraseDocumentStandard => start (current slide only)");
+      const modeLabel = mode === "standard" ? "Standard" : "Ludicrous";
+      console.log(`paraphraseDocument${modeLabel} => start (current slide only)`);
 
       const allWarnings: string[] = [];
       const healthResult = await checkServiceHealth();
@@ -1371,7 +1373,7 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
       currentSlide.load("shapes");
       await context.sync();
 
-      console.log(`paraphraseDocumentStandard => processing slide with ${currentSlide.shapes.items.length} shapes`);
+      console.log(`paraphraseDocument${modeLabel} => processing slide with ${currentSlide.shapes.items.length} shapes`);
 
       // Collect text shapes from current slide only
       const eligibleShapes: Array<{ shape: PowerPoint.Shape; text: string; shapeIndex: number }> = [];
@@ -1388,13 +1390,13 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
 
         // Skip very short text boxes (likely titles)
         if (wordCount < 15) {
-          console.log(`paraphraseDocumentStandard => skipping short shape ${i} (${wordCount} words)`);
+          console.log(`paraphraseDocument${modeLabel} => skipping short shape ${i} (${wordCount} words)`);
           continue;
         }
 
         // Skip reference headers
         if (matchesReferenceHeader(trimmed)) {
-          console.log(`paraphraseDocumentStandard => skipping reference header at shape ${i}`);
+          console.log(`paraphraseDocument${modeLabel} => skipping reference header at shape ${i}`);
           continue;
         }
 
@@ -1422,21 +1424,21 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
       }
 
       console.log(
-        `paraphraseDocumentStandard => totalWords=${originalWordCount}, using ${numAccounts} account(s) via batch API`
+        `paraphraseDocument${modeLabel} => totalWords=${originalWordCount}, using ${numAccounts} account(s) via batch API`
       );
 
       const accountChunks = splitIntoAccountChunks(eligibleShapes, numAccounts);
 
-      const batchPayload: Record<string, string> = { mode: "standard" };
+      const batchPayload: Record<string, string> = { mode };
       const usedAccounts: AccountKey[] = [];
 
       accountChunks.forEach((chunk) => {
         batchPayload[chunk.accountKey] = buildBatchPayloadText(chunk.items);
         usedAccounts.push(chunk.accountKey);
-        console.log(`paraphraseDocumentStandard => ${chunk.accountKey}: ${chunk.items.length} shapes`);
+        console.log(`paraphraseDocument${modeLabel} => ${chunk.accountKey}: ${chunk.items.length} shapes`);
       });
 
-      console.log(`paraphraseDocumentStandard => sending batch request (${eligibleShapes.length} shapes total)`);
+      console.log(`paraphraseDocument${modeLabel} => sending batch request (${eligibleShapes.length} shapes total)`);
       const response = await fetch(BATCH_API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1474,7 +1476,7 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
         const expected = accountChunks[idx].items.length;
         const actual = parsedChunks[idx].length;
         if (actual !== expected) {
-          console.error(`paraphraseDocumentStandard => mismatch in chunk ${idx}: sent ${expected}, received ${actual}`);
+          console.error(`paraphraseDocument${modeLabel} => mismatch in chunk ${idx}: sent ${expected}, received ${actual}`);
           throw new Error(
             `Paraphrase count mismatch. Sent ${eligibleShapes.length} text boxes, received ${parsedChunks.reduce((s, p) => s + p.length, 0)}. Aborting to prevent data loss.`
           );
@@ -1514,11 +1516,11 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
             await context.sync();
 
             console.log(
-              `paraphraseDocumentStandard => updated shape ${item.shapeIndex}\nOLD: ${item.text.substring(0, 80)}...\nNEW: ${newText.substring(0, 80)}...`
+              `paraphraseDocument${modeLabel} => updated shape ${item.shapeIndex}\nOLD: ${item.text.substring(0, 80)}...\nNEW: ${newText.substring(0, 80)}...`
             );
             updatedCount++;
           } catch (updateError) {
-            console.error(`paraphraseDocumentStandard => failed to update shape ${item.shapeIndex}:`, updateError);
+            console.error(`paraphraseDocument${modeLabel} => failed to update shape ${item.shapeIndex}:`, updateError);
           }
         }
       }
@@ -1527,7 +1529,7 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
       const changeMetrics = calculateTextChangeMetrics(originalTexts, newTexts);
 
       return {
-        message: `Successfully paraphrased ${updatedCount} text box${updatedCount === 1 ? "" : "es"} on current slide (Standard mode).`,
+        message: `Successfully paraphrased ${updatedCount} text box${updatedCount === 1 ? "" : "es"} on current slide (${modeLabel} mode).`,
         warnings: allWarnings,
         metrics: {
           originalWordCount: changeMetrics.totalOriginalWords,
@@ -1543,13 +1545,26 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
       };
     });
   } catch (error) {
-    console.error("Error in paraphraseDocumentStandard:", error);
+    console.error(`Error in paraphraseDocumentSinglePass (${mode}):`, error);
     throw new Error(`Error paraphrasing slide: ${error.message}`);
   }
 }
 
-export async function paraphraseAllSlides(mode: "dual" | "standard" = "dual"): Promise<ParaphraseResult> {
-  const logPrefix = mode === "dual" ? "paraphraseAllSlides" : "paraphraseAllSlidesStandard";
+export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
+  return paraphraseDocumentSinglePass("standard");
+}
+
+export async function paraphraseDocumentLudicrous(): Promise<ParaphraseResult> {
+  return paraphraseDocumentSinglePass("ludicrous");
+}
+
+export async function paraphraseAllSlides(mode: "dual" | "standard" | "ludicrous" = "dual"): Promise<ParaphraseResult> {
+  const logPrefix =
+    mode === "dual"
+      ? "paraphraseAllSlides"
+      : mode === "standard"
+        ? "paraphraseAllSlidesStandard"
+        : "paraphraseAllSlidesLudicrous";
 
   try {
     return await PowerPoint.run(async (context) => {
@@ -1795,7 +1810,7 @@ export async function paraphraseAllSlides(mode: "dual" | "standard" = "dual"): P
         message:
           mode === "dual"
             ? `Successfully paraphrased ${updatedCount} text box${updatedCount === 1 ? "" : "es"} across ${slideCount} slide${slideCount === 1 ? "" : "s"} in ${requestCount} batch${requestCount === 1 ? "" : "es"}.`
-            : `Successfully paraphrased ${updatedCount} text box${updatedCount === 1 ? "" : "es"} across ${slideCount} slide${slideCount === 1 ? "" : "s"} in ${requestCount} batch${requestCount === 1 ? "" : "es"} (Standard mode).`,
+            : `Successfully paraphrased ${updatedCount} text box${updatedCount === 1 ? "" : "es"} across ${slideCount} slide${slideCount === 1 ? "" : "s"} in ${requestCount} batch${requestCount === 1 ? "" : "es"} (${mode === "standard" ? "Standard" : "Ludicrous"} mode).`,
         warnings: allWarnings,
         metrics: {
           originalWordCount: changeMetrics.totalOriginalWords,
@@ -1824,7 +1839,11 @@ export async function paraphraseSelectedTextStandard(): Promise<ParaphraseResult
   return paraphraseSelectedTextWithMode("standard");
 }
 
-async function paraphraseSelectedTextWithMode(mode: "dual" | "standard"): Promise<ParaphraseResult> {
+export async function paraphraseSelectedTextLudicrous(): Promise<ParaphraseResult> {
+  return paraphraseSelectedTextWithMode("ludicrous");
+}
+
+async function paraphraseSelectedTextWithMode(mode: "dual" | "standard" | "ludicrous"): Promise<ParaphraseResult> {
   return new Promise((resolve, reject) => {
     Office.context.document.getSelectedDataAsync(Office.CoercionType.Text, async (result) => {
       if (result.status === Office.AsyncResultStatus.Failed) {
@@ -1881,7 +1900,9 @@ async function paraphraseSelectedTextWithMode(mode: "dual" | "standard"): Promis
               message:
                 mode === "dual"
                   ? "Selected text paraphrased successfully"
-                  : "Selected text paraphrased successfully (Standard mode)",
+                  : mode === "standard"
+                    ? "Selected text paraphrased successfully (Standard mode)"
+                    : "Selected text paraphrased successfully (Ludicrous mode)",
               warnings: allWarnings,
               metrics: {
                 originalWordCount: changeMetrics.totalOriginalWords,

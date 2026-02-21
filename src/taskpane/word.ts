@@ -814,8 +814,8 @@ export async function removeReferences(): Promise<string> {
 
         // Only update paragraph if we found and removed citations
         if (hadMatch) {
-          // Replace the paragraph's content
-          paragraph.getRange().insertText(text, Word.InsertLocation.replace);
+          // Replace only paragraph content (not paragraph mark) to preserve boundaries.
+          paragraph.getRange(Word.RangeLocation.content).insertText(text, Word.InsertLocation.replace);
           paragraph.font.bold = false;
           console.log("Original:", originalText);
           console.log("Updated:", text);
@@ -887,7 +887,8 @@ export async function removeLinks(deleteAll: boolean = false): Promise<string> {
           linksRemovedCount += matches.length;
           // Replace URL-like text and clean up spaces before punctuation.
           const newText = originalText.replace(urlRegex, "").replace(/\s+([.,;])/g, "$1");
-          paragraph.insertText(newText, Word.InsertLocation.replace);
+          // Replace only paragraph content (not paragraph mark) to preserve boundaries.
+          paragraph.getRange(Word.RangeLocation.content).insertText(newText, Word.InsertLocation.replace);
           paragraph.font.bold = false;
         }
       }
@@ -960,7 +961,8 @@ export async function removeWeirdNumbers(): Promise<string> {
           totalRemoved += matches.length;
           // Replace the weird numbers and clean up potential double spaces.
           const newText = originalText.replace(weirdNumberPattern, "").replace(/\s{2,}/g, " ");
-          paragraph.insertText(newText, Word.InsertLocation.replace);
+          // Replace only paragraph content (not paragraph mark) to preserve boundaries.
+          paragraph.getRange(Word.RangeLocation.content).insertText(newText, Word.InsertLocation.replace);
           paragraph.font.bold = false;
         }
       }
@@ -1040,6 +1042,7 @@ interface ParaphraseParagraphMeta {
 }
 
 const PARAPHRASE_DELIMITER = "qbpdelim123";
+type SinglePassMode = "standard" | "ludicrous";
 
 export async function paraphraseDocument(): Promise<ParaphraseResult> {
   try {
@@ -1447,9 +1450,9 @@ export async function paraphraseSelectedText(): Promise<ParaphraseResult> {
 }
 
 /**
- * Paraphrase selected text using the batch API (Standard mode)
+ * Paraphrase selected text using single-pass modes (standard/ludicrous)
  */
-export async function paraphraseSelectedTextStandard(): Promise<ParaphraseResult> {
+async function paraphraseSelectedTextSinglePass(mode: SinglePassMode): Promise<ParaphraseResult> {
   try {
     return await Word.run(async (context) => {
       const allWarnings: string[] = [];
@@ -1473,13 +1476,13 @@ export async function paraphraseSelectedTextStandard(): Promise<ParaphraseResult
         throw new Error("No text selected");
       }
 
-      // Call the batch paraphrase API with standard mode
+      // Call the batch paraphrase API with selected single-pass mode
       const response = await fetch(BATCH_API_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ acc1: selectedText, mode: "standard" }),
+        body: JSON.stringify({ acc1: selectedText, mode }),
       });
 
       if (!response.ok) {
@@ -1497,7 +1500,7 @@ export async function paraphraseSelectedTextStandard(): Promise<ParaphraseResult
         throw new Error("No response received from batch API");
       }
 
-      // For standard mode, use result field
+      // Single-pass modes return `result`.
       const paraphrasedText = result.result;
 
       if (!paraphrasedText) {
@@ -1512,21 +1515,35 @@ export async function paraphraseSelectedTextStandard(): Promise<ParaphraseResult
       selection.font.bold = false;
       await context.sync();
 
-      return { message: "Text paraphrased successfully", warnings: allWarnings };
+      return {
+        message:
+          mode === "standard"
+            ? "Text paraphrased successfully (Standard mode)"
+            : "Text paraphrased successfully (Ludicrous mode)",
+        warnings: allWarnings,
+      };
     });
   } catch (error) {
-    console.error("Error in paraphraseSelectedTextStandard:", error);
+    console.error(`Error in paraphraseSelectedTextSinglePass (${mode}):`, error);
     throw new Error(`Error paraphrasing text: ${error.message}`);
   }
 }
 
+export async function paraphraseSelectedTextStandard(): Promise<ParaphraseResult> {
+  return paraphraseSelectedTextSinglePass("standard");
+}
+
+export async function paraphraseSelectedTextLudicrous(): Promise<ParaphraseResult> {
+  return paraphraseSelectedTextSinglePass("ludicrous");
+}
+
 /**
- * Paraphrase all body paragraphs in the document using the batch API (Standard mode)
+ * Paraphrase all body paragraphs in the document using single-pass modes (standard/ludicrous)
  */
-export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
+async function paraphraseDocumentSinglePass(mode: SinglePassMode): Promise<ParaphraseResult> {
   try {
     return await Word.run(async (context) => {
-      console.log("Starting document paraphrase (Standard mode with batch API)...");
+      console.log(`Starting document paraphrase (${mode} mode with batch API)...`);
       const allWarnings: string[] = [];
 
       // Health check (non-blocking)
@@ -1634,7 +1651,7 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
       }
 
       // Build batch request payload
-      const batchPayload: Record<string, string> = { mode: "standard" };
+      const batchPayload: Record<string, string> = { mode };
       const usedAccounts: AccountKey[] = [];
 
       chunks.forEach((chunk, idx) => {
@@ -1667,14 +1684,14 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
       const batchWarnings = collectBatchWarnings(data, usedAccounts);
       allWarnings.push(...batchWarnings);
 
-      // Extract paraphrased text from each account (using result for standard mode)
+      // Extract paraphrased text from each account (single-pass modes use `result`)
       const paraphrasedChunks: string[] = [];
       for (const key of usedAccounts) {
         const accountResult = data[key];
         if (!accountResult) {
           throw new Error(`No response received for account ${key}`);
         }
-        // For standard mode, we use result field
+        // Single-pass modes use `result`.
         const paraphrasedText = accountResult.result;
         if (!paraphrasedText) {
           // If result is missing but we have an error, it's a complete failure
@@ -1814,7 +1831,15 @@ export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
       };
     });
   } catch (error) {
-    console.error("Error in paraphraseDocumentStandard:", error);
+    console.error(`Error in paraphraseDocumentSinglePass (${mode}):`, error);
     throw new Error(`Error paraphrasing document: ${error.message}`);
   }
+}
+
+export async function paraphraseDocumentStandard(): Promise<ParaphraseResult> {
+  return paraphraseDocumentSinglePass("standard");
+}
+
+export async function paraphraseDocumentLudicrous(): Promise<ParaphraseResult> {
+  return paraphraseDocumentSinglePass("ludicrous");
 }
