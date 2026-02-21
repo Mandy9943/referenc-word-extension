@@ -159,38 +159,41 @@ python3 scripts/paraphrase_docx.py standard "/path/in.docx" --dry-run
 
 ## Bulk PPTX automation
 
-If you need one-shot paraphrasing for large decks, use the offline PPTX script. It reads slide text boxes and speaker notes from the `.pptx`, sends batched requests to the same AnalizeAI endpoint used by the add-in, and writes text back to the same slide/notes paragraph locations.
+For one-command PPTX processing, use the offline script pipeline. It enforces the exact sequence:
 
-Basic run:
+1. Clean weird artifacts + existing in-text citations (without touching headings/subtitles or detected references section)
+2. Paraphrase slide text and speaker notes (`SIMPLE+SHORT` by default)
+3. Detect references and insert new in-text citations into both slides and notes
+4. Write output as `pr <original-name>.pptx`
+
+Commands:
 
 ```bash
-npm run pptx:paraphrase -- "/absolute/path/to/input.pptx"
-```
-
-Shortcut run (auto-detect a single `.pptx` on Desktop):
-
-```bash
+# SIMPLE+SHORT mode
 npm run pptx
+
+# STANDARD mode
+npm run pptx standard
 ```
 
-Output defaults to `pr <input-name>.pptx` next to the original file.
+Input behavior:
+
+* If no file path is passed, the script auto-selects a single `.pptx` on Desktop.
+* It ignores temporary PowerPoint lock files (`~$*.pptx`) and generated `pr *.pptx` outputs when the original source file is also present.
+
+Output behavior:
+
+* Default output is `pr <input-name>.pptx` in the same folder as the input file.
+* If references cannot be detected or inserted, the script exits with a terminal error and does **not** write an output file.
 
 Useful options:
 
 ```bash
-python3 scripts/paraphrase_pptx.py "/path/in.pptx" \
-  --output "/path/out.pptx" \
-  --mode dual \
-  --max-items-per-request 120 \
-  --max-words-per-request 2400
+python3 scripts/paraphrase_pptx.py "/path/in.pptx"
+python3 scripts/paraphrase_pptx.py standard "/path/in.pptx"
+python3 scripts/paraphrase_pptx.py --mode dual "/path/in.pptx" --dry-run
+python3 scripts/paraphrase_pptx.py --no-notes "/path/in.pptx"
 ```
-
-Notes:
-
-* Use `--no-notes` to paraphrase only slide text.
-* Use `--no-slides` to paraphrase only speaker notes.
-* Use `--dry-run` to inspect eligible paragraph counts without modifying files.
-* If no input path is passed, the script auto-selects the only `.pptx` on Desktop (excluding temporary `~$*.pptx` and generated `pr *.pptx` outputs only when their original source file is also present).
 
 ## Testing & quality
 

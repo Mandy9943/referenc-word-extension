@@ -308,6 +308,78 @@ function detectReferenceSection(metas: ShapeMeta[]): ReferenceSectionDetection |
   };
 }
 
+function shapeMetaKey(meta: Pick<ShapeMeta, "slideId" | "shapeId">): string {
+  return `${meta.slideId}::${meta.shapeId}`;
+}
+
+function handleShapeKey(handle: TextShapeHandle): string {
+  return `${handle.slide.id}::${handle.shape.id}`;
+}
+
+async function collectShapeMetas(
+  context: PowerPoint.RequestContext,
+  textShapes: TextShapeHandle[]
+): Promise<{ metas: ShapeMeta[]; textByKey: Map<string, string> }> {
+  const metas: ShapeMeta[] = [];
+  const textByKey = new Map<string, string>();
+  let globalIndex = 0;
+
+  for (const handle of textShapes) {
+    const text = await tryLoadShapeText(handle, context);
+    if (!text) continue;
+    const sanitized = text.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+    if (!sanitized) continue;
+
+    const words = sanitized.split(/\s+/).filter(Boolean);
+    const meta: ShapeMeta = {
+      slideId: handle.slide.id,
+      slideIndex: handle.slideIndex,
+      shapeId: handle.shape.id,
+      shapeIndex: handle.shapeIndex,
+      shapeType: handle.shape.type,
+      text: sanitized,
+      wordCount: words.length,
+      isTitle: handle.shapeIndex === 0 && words.length < 10,
+      index: globalIndex++,
+    };
+
+    metas.push(meta);
+    textByKey.set(handleShapeKey(handle), sanitized);
+  }
+
+  return { metas, textByKey };
+}
+
+async function getReferenceShapeKeysForTextShapes(
+  context: PowerPoint.RequestContext,
+  textShapes: TextShapeHandle[]
+): Promise<Set<string>> {
+  const { metas } = await collectShapeMetas(context, textShapes);
+  return getReferenceShapeKeySet(metas);
+}
+
+function getReferenceShapeKeySet(metas: ShapeMeta[]): Set<string> {
+  const keys = new Set<string>();
+  const detection = detectReferenceSection(metas);
+  if (!detection) return keys;
+
+  if (detection.mode === "header") {
+    for (const meta of detection.referenceTailMetas) {
+      keys.add(shapeMetaKey(meta));
+    }
+    return keys;
+  }
+
+  if (detection.inferredSlideId) {
+    for (const meta of metas) {
+      if (meta.slideId === detection.inferredSlideId) {
+        keys.add(shapeMetaKey(meta));
+      }
+    }
+  }
+  return keys;
+}
+
 function findConclusionRange(
   metas: ShapeMeta[],
   referenceStartIndex: number
@@ -839,6 +911,8 @@ export async function removeReferences(): Promise<string> {
         /\((?:[^()]+)\set\sal\.?[,\s]\s?\d{4}[a-z]?\)/g,
         /\((?:[^,()]+(,\s[^,()]+)*)[,\s]\s?\d{4}[a-z]?\)/g,
       ];
+      const referenceShapeKeys = await getReferenceShapeKeysForTextShapes(context, textShapes);
+      console.log(`removeReferences => reference section shape count: ${referenceShapeKeys.size}`);
 
       let totalRemoved = 0;
       let shapesUpdated = 0;
@@ -846,6 +920,10 @@ export async function removeReferences(): Promise<string> {
       for (const handle of textShapes) {
         const location = describeShape(handle);
         console.log(`removeReferences => inspecting ${location}`);
+        if (referenceShapeKeys.has(handleShapeKey(handle))) {
+          console.log(`removeReferences => skipping reference shape ${location}`);
+          continue;
+        }
         const text = await tryLoadShapeText(handle, context);
         if (!text) {
           console.warn(`removeReferences => skipping ${location} (unable to load text)`);
@@ -901,11 +979,19 @@ export async function removeLinks(deleteAll: boolean = false): Promise<string> {
       }
 
       const urlRegex = /\b((https?:\/\/)?[\w.-]+(?:\.[\w.-]+)+)\b/g;
+      const referenceShapeKeys = deleteAll ? new Set<string>() : await getReferenceShapeKeysForTextShapes(context, textShapes);
+      if (!deleteAll) {
+        console.log(`removeLinks => reference section shape count: ${referenceShapeKeys.size}`);
+      }
       let linksRemovedCount = 0;
 
       for (const handle of textShapes) {
         const location = describeShape(handle);
         console.log(`removeLinks => inspecting ${location}`);
+        if (!deleteAll && referenceShapeKeys.has(handleShapeKey(handle))) {
+          console.log(`removeLinks => skipping reference shape ${location}`);
+          continue;
+        }
         const text = await tryLoadShapeText(handle, context);
         if (!text) {
           console.warn(`removeLinks => skipping ${location} (unable to load text)`);
@@ -952,11 +1038,17 @@ export async function removeWeirdNumbers(): Promise<string> {
       }
 
       const weirdNumberPattern = /[【[]\d+.*?[†+t].*?[】\]]\S*/g;
+      const referenceShapeKeys = await getReferenceShapeKeysForTextShapes(context, textShapes);
+      console.log(`removeWeirdNumbers => reference section shape count: ${referenceShapeKeys.size}`);
       let totalRemoved = 0;
 
       for (const handle of textShapes) {
         const location = describeShape(handle);
         console.log(`removeWeirdNumbers => inspecting ${location}`);
+        if (referenceShapeKeys.has(handleShapeKey(handle))) {
+          console.log(`removeWeirdNumbers => skipping reference shape ${location}`);
+          continue;
+        }
         const text = await tryLoadShapeText(handle, context);
         if (!text) {
           console.warn(`removeWeirdNumbers => skipping ${location} (unable to load text)`);

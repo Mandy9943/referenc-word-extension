@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Bulk paraphrase PowerPoint slide text + speaker notes via the QuillBot batch API.
-
-This script works on .pptx files directly (zip + XML), so it can process an entire
-deck in one run and write paraphrased text back to the exact slide/notes paragraphs.
+One-shot PPTX pipeline for:
+1) cleaning in-text citations + weird artifacts (while preserving headings/subtitles),
+2) paraphrasing eligible slide + speaker-notes paragraphs via batch API,
+3) inserting refreshed in-text references into slide + notes body text,
+4) writing output as: pr <original-name>.pptx
 """
 
 from __future__ import annotations
@@ -20,13 +21,13 @@ import zipfile
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 API_URL_DEFAULT = "https://analizeai.com/paraphrase-batch"
 PARAPHRASE_DELIMITER = "qbpdelim123"
 ACCOUNT_KEYS = ("acc1", "acc2", "acc3")
-ZERO_WIDTH_RE = re.compile(r"[\u200B-\u200D\uFEFF]")
 
+ZERO_WIDTH_RE = re.compile(r"[\u200B-\u200D\uFEFF]")
 SLIDE_XML_RE = re.compile(r"^ppt/slides/slide(\d+)\.xml$")
 NOTES_XML_RE = re.compile(r"^ppt/notesSlides/notesSlide(\d+)\.xml$")
 
@@ -35,9 +36,9 @@ NS = {
     "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
 }
 
-# Keep these in sync with taskpane word/powerpoint logic.
 TRAILING_PUNCTUATION = r"[-:;,.!?-]*"
 NUMBERING_PREFIX = r"(?:(?:\d+(?:\.\d+)*|[IVX]+)\.?\s*)?"
+
 REFERENCE_HEADER_PATTERNS = [
     re.compile(
         rf"^\s*{NUMBERING_PREFIX}references?(?:\s+list)?(?:\s+section)?\s*{TRAILING_PUNCTUATION}\s*$",
@@ -59,23 +60,90 @@ REFERENCE_HEADER_PATTERNS = [
         rf"^\s*{NUMBERING_PREFIX}list\s+of\s+references\s*{TRAILING_PUNCTUATION}\s*$",
         re.IGNORECASE,
     ),
+    re.compile(
+        rf"^\s*{NUMBERING_PREFIX}works\s+cited\s*{TRAILING_PUNCTUATION}\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"^\s*{NUMBERING_PREFIX}sources?\s*{TRAILING_PUNCTUATION}\s*$",
+        re.IGNORECASE,
+    ),
 ]
+
+YEAR_RE = re.compile(r"\b(?:19|20)\d{2}[a-z]?\b")
+URL_OR_DOI_RE = re.compile(r"\b(?:https?://|www\.|doi:\s*|10\.\d{4,9}/)\S+", re.IGNORECASE)
+REFERENCE_CUE_RE = re.compile(
+    r"\b(?:available at|retrieved from|accessed|doi|journal|vol\.?|no\.?|pp\.?|edition|ed\.)\b",
+    re.IGNORECASE,
+)
+AUTHOR_RE = re.compile(r"(?:^|[\s;])(?:[A-Z][a-z]+,\s*(?:[A-Z]\.|[A-Z][a-z]+))")
+LIST_PREFIX_RE = re.compile(r"^\s*(?:\d{1,3}[.)\]]|[-•])\s+")
+
+CITATION_PATTERNS = [
+    re.compile(r"\[(?:[^\]]+)[,\s]\s?\d{4}[a-z]?\]"),
+    re.compile(r"\((?:[^,()]+(,\s[^,()]+)*(?:,\sand\s[^,()]+)?)[,\s]\s?\d{4}[a-z]?\)"),
+    re.compile(r"\((?:[^,()]+)[,\s]\s?\d{4}[a-z]?\)"),
+    re.compile(r"\((?:[^()]+\sand\s[^,()]+)[,\s]\s?\d{4}[a-z]?\)"),
+    re.compile(r"\((?:[^()]+)\set\sal\.?[,\s]\s?\d{4}[a-z]?\)"),
+    re.compile(r"\((?:[^,()]+(,\s[^,()]+)*)[,\s]\s?\d{4}[a-z]?\)"),
+]
+WEIRD_NUMBER_PATTERN = re.compile(r"[【\[]\d+.*?[†+t].*?[】\]]\S*")
+EXISTING_CITATION_RE = re.compile(r"\(\s*[^)]*?\d{4}[a-z]?\s*\)")
+
+ParagraphKey = Tuple[str, int]
 
 
 @dataclass
-class Candidate:
+class PptParagraph:
     archive_path: str
     kind: str  # "slide" | "notes"
     file_number: int
     paragraph_index: int
+    global_index: int
     text_nodes: List[ET.Element]
-    original_text: str
+    text: str
     word_count: int
-    paraphrased_text: str | None = None
+    is_first_non_empty: bool
+
+
+@dataclass
+class ReferenceDetection:
+    mode: str
+    reference_keys: Set[ParagraphKey]
+    inferred_kind: Optional[str] = None
+    inferred_file_number: Optional[int] = None
+
+
+@dataclass
+class Step1Stats:
+    cleaned_paragraphs: int
+    removed_citations: int
+    removed_weird_numbers: int
+
+
+@dataclass
+class Step2Stats:
+    paraphrased_paragraphs: int
+    request_count: int
+    total_words: int
+    mode: str
+
+
+@dataclass
+class Step3Stats:
+    detection_mode: str
+    reference_count: int
+    inserted_citations: int
+    inserted_slide_paragraphs: int
+    inserted_notes_paragraphs: int
 
 
 def sanitize_text(text: str) -> str:
     return ZERO_WIDTH_RE.sub("", text or "").strip()
+
+
+def normalize_space(text: str) -> str:
+    return re.sub(r"\s{2,}", " ", text).strip()
 
 
 def count_words(text: str) -> int:
@@ -83,6 +151,10 @@ def count_words(text: str) -> int:
     if not trimmed:
         return 0
     return len([token for token in trimmed.split() if token])
+
+
+def paragraph_key(paragraph: PptParagraph) -> ParagraphKey:
+    return (paragraph.archive_path, paragraph.paragraph_index)
 
 
 def matches_reference_header(text: str) -> bool:
@@ -93,6 +165,228 @@ def matches_reference_header(text: str) -> bool:
         return True
     first_line = trimmed.splitlines()[0].strip() if "\n" in trimmed else trimmed
     return any(pattern.match(first_line) for pattern in REFERENCE_HEADER_PATTERNS)
+
+
+def is_reference_like_line(raw_line: str) -> bool:
+    line = normalize_space(raw_line)
+    if not line:
+        return False
+    if count_words(line) < 4:
+        return False
+
+    has_year = bool(YEAR_RE.search(line))
+    has_url_or_doi = bool(URL_OR_DOI_RE.search(line))
+    has_cue = bool(REFERENCE_CUE_RE.search(line))
+    has_author = bool(AUTHOR_RE.search(line))
+    has_list_prefix = bool(LIST_PREFIX_RE.search(line))
+
+    if has_url_or_doi and (has_year or has_author or has_list_prefix):
+        return True
+    if has_year and (has_author or has_cue or has_list_prefix):
+        return True
+    return False
+
+
+def split_reference_candidate_lines(text: str) -> List[str]:
+    if not text:
+        return []
+    prepared = text.replace("\r", "\n")
+    prepared = re.sub(r"(?<!\d)(\d{1,3}[.)]\s*)", r"\n\1", prepared)
+    lines = [sanitize_text(line) for line in re.split(r"\n+", prepared) if sanitize_text(line)]
+    if lines:
+        return lines
+    return [sanitize_text(text)] if sanitize_text(text) else []
+
+
+def count_reference_like_lines(text: str) -> int:
+    lines = split_reference_candidate_lines(text)
+    return sum(1 for line in lines if is_reference_like_line(line))
+
+
+def infer_reference_file_number(paragraphs: Sequence[PptParagraph], kind: str) -> int:
+    grouped: Dict[int, List[str]] = {}
+    for paragraph in paragraphs:
+        if paragraph.kind != kind:
+            continue
+        grouped.setdefault(paragraph.file_number, []).append(paragraph.text)
+
+    best_match: Optional[Tuple[int, int]] = None
+    for file_number, texts in grouped.items():
+        reference_line_count = 0
+        dense_paragraph_count = 0
+        url_or_doi_paragraph_count = 0
+
+        for text in texts:
+            line_count = count_reference_like_lines(text)
+            reference_line_count += line_count
+            if line_count >= 2:
+                dense_paragraph_count += 1
+            if URL_OR_DOI_RE.search(text):
+                url_or_doi_paragraph_count += 1
+
+        looks_like_reference_block = (
+            reference_line_count >= 4
+            or dense_paragraph_count >= 2
+            or (reference_line_count >= 3 and url_or_doi_paragraph_count >= 1)
+        )
+        if not looks_like_reference_block:
+            continue
+
+        score = reference_line_count * 3 + dense_paragraph_count * 5 + url_or_doi_paragraph_count * 2
+        if (
+            best_match is None
+            or score > best_match[1]
+            or (score == best_match[1] and file_number > best_match[0])
+        ):
+            best_match = (file_number, score)
+
+    return best_match[0] if best_match else -1
+
+
+def detect_reference_section(paragraphs: Sequence[PptParagraph]) -> Optional[ReferenceDetection]:
+    for idx in range(len(paragraphs) - 1, -1, -1):
+        paragraph = paragraphs[idx]
+        if not matches_reference_header(paragraph.text):
+            continue
+
+        reference_keys: Set[ParagraphKey] = {paragraph_key(paragraph)}
+        for candidate in paragraphs:
+            if candidate.archive_path == paragraph.archive_path and candidate.paragraph_index < paragraph.paragraph_index:
+                reference_keys.add(paragraph_key(candidate))
+        for tail in paragraphs[idx + 1 :]:
+            reference_keys.add(paragraph_key(tail))
+
+        return ReferenceDetection(mode="header", reference_keys=reference_keys)
+
+    for kind, mode_label in (("slide", "inferred-slide"), ("notes", "inferred-notes")):
+        inferred_file_number = infer_reference_file_number(paragraphs, kind)
+        if inferred_file_number == -1:
+            continue
+
+        reference_keys = {
+            paragraph_key(paragraph)
+            for paragraph in paragraphs
+            if paragraph.kind == kind and paragraph.file_number == inferred_file_number
+        }
+        if reference_keys:
+            return ReferenceDetection(
+                mode=mode_label,
+                reference_keys=reference_keys,
+                inferred_kind=kind,
+                inferred_file_number=inferred_file_number,
+            )
+
+    return None
+
+
+def is_heading_or_subtitle(paragraph: PptParagraph) -> bool:
+    text = paragraph.text
+    if not text:
+        return False
+
+    if paragraph.kind == "slide" and paragraph.is_first_non_empty and paragraph.word_count <= 14:
+        return True
+
+    if text.endswith(":"):
+        return True
+
+    has_terminal_punctuation = bool(re.search(r"[.!?]$", text))
+    is_shortish = 0 < paragraph.word_count <= 12
+    words = [w for w in text.split() if w]
+    if not words:
+        return False
+
+    capitalized = sum(1 for w in words if re.match(r"^[A-Z]", w))
+    is_title_case = len(words) > 1 and (capitalized / len(words)) > 0.6
+
+    return (not has_terminal_punctuation) and is_shortish and is_title_case
+
+
+def split_sentences(text: str) -> List[str]:
+    matches = re.findall(r"[^.!?]+(?:[.!?]+[\"')\]]*)?|[^.!?]+$", text)
+    return matches if matches else [text]
+
+
+def append_citation_at_sentence_end(sentence: str, citation: str) -> str:
+    trimmed = sentence.rstrip()
+    match = re.search(r"([.?!][\"')\]]*)$", trimmed)
+    if not match:
+        sep = "" if trimmed.endswith(" ") else " "
+        return trimmed + sep + citation
+    punctuation = match.group(1)
+    core = trimmed[: -len(punctuation)]
+    sep = "" if core.endswith(" ") else " "
+    return f"{core}{sep}{citation}{punctuation}"
+
+
+def select_sentence_index_for_citation(text: str) -> int:
+    sentences = split_sentences(text)
+    candidate_indexes: List[int] = []
+
+    for i, sentence in enumerate(sentences):
+        stripped = sentence.strip()
+        if not stripped:
+            continue
+        if i == 0 and len(sentences) > 1:
+            continue
+        if count_words(stripped) < 8:
+            continue
+        if EXISTING_CITATION_RE.search(stripped):
+            continue
+
+        lower = stripped.lower()
+        if (
+            lower.startswith("in conclusion")
+            or lower.startswith("to conclude")
+            or lower.startswith("overall,")
+            or lower.startswith("to sum up")
+        ):
+            continue
+
+        candidate_indexes.append(i)
+
+    if candidate_indexes:
+        return candidate_indexes[-1]
+
+    if not EXISTING_CITATION_RE.search(text) and count_words(text) >= 8:
+        return max(0, len(sentences) - 1)
+
+    return -1
+
+
+def inject_citation_into_paragraph(text: str, citation: str) -> Tuple[str, bool]:
+    sentences = split_sentences(text)
+    sentence_index = select_sentence_index_for_citation(text)
+    if sentence_index == -1:
+        return text, False
+
+    updated_sentences = list(sentences)
+    updated_sentences[sentence_index] = append_citation_at_sentence_end(updated_sentences[sentence_index], citation)
+    reconstructed = "".join(updated_sentences)
+    return reconstructed, reconstructed != text
+
+
+def remove_citations_and_weird_tokens(text: str) -> Tuple[str, int, int]:
+    updated = text
+    removed_citations = 0
+    removed_weird = 0
+
+    for pattern in CITATION_PATTERNS:
+        matches = list(pattern.finditer(updated))
+        if matches:
+            removed_citations += len(matches)
+            updated = pattern.sub("", updated)
+
+    weird_matches = list(WEIRD_NUMBER_PATTERN.finditer(updated))
+    if weird_matches:
+        removed_weird += len(weird_matches)
+        updated = WEIRD_NUMBER_PATTERN.sub("", updated)
+
+    updated = re.sub(r"\s+\.", ".", updated)
+    updated = re.sub(r"\s+([,;:])", r"\1", updated)
+    updated = re.sub(r"\s{2,}", " ", updated).strip()
+
+    return updated, removed_citations, removed_weird
 
 
 def choose_account_count(total_words: int) -> int:
@@ -121,26 +415,47 @@ def parse_paraphrase_parts(text: str, expected_count: int) -> List[str]:
     return parts
 
 
-def build_payload_text(items: Sequence[Candidate]) -> str:
+def build_payload_text(items: Sequence[PptParagraph]) -> str:
     chunks: List[str] = []
     for item in items:
         chunks.append(PARAPHRASE_DELIMITER)
-        chunks.append(item.original_text)
+        chunks.append(item.text)
     return "\n\n".join(chunks)
 
 
-def split_into_account_chunks(items: Sequence[Candidate], account_count: int) -> List[Tuple[str, List[Candidate]]]:
+def split_into_account_chunks(items: Sequence[PptParagraph], account_count: int) -> List[Tuple[str, List[PptParagraph]]]:
     chunk_size = math.ceil(len(items) / account_count)
-    chunks: List[Tuple[str, List[Candidate]]] = []
+    chunks: List[Tuple[str, List[PptParagraph]]] = []
     for i in range(account_count):
         start = i * chunk_size
         end = min(start + chunk_size, len(items))
         if start >= len(items):
             break
-        chunk = list(items[start:end])
-        if chunk:
-            chunks.append((ACCOUNT_KEYS[i], chunk))
+        section = list(items[start:end])
+        if section:
+            chunks.append((ACCOUNT_KEYS[i], section))
     return chunks
+
+
+def take_request_batch(
+    remaining: deque[PptParagraph],
+    max_items_per_request: int,
+    max_words_per_request: int,
+) -> List[PptParagraph]:
+    batch: List[PptParagraph] = []
+    total_words = 0
+
+    while remaining and len(batch) < max_items_per_request:
+        next_item = remaining[0]
+        if batch and (total_words + next_item.word_count > max_words_per_request):
+            break
+        batch.append(remaining.popleft())
+        total_words += next_item.word_count
+
+    if not batch and remaining:
+        batch.append(remaining.popleft())
+
+    return batch
 
 
 def post_batch_request(api_url: str, payload: Dict[str, str], timeout_seconds: int) -> Dict[str, object]:
@@ -161,21 +476,12 @@ def post_batch_request(api_url: str, payload: Dict[str, str], timeout_seconds: i
         raise RuntimeError(f"Failed to reach batch API: {err}") from err
 
 
-def extract_account_output(
-    response: Dict[str, object],
-    account_key: str,
-    mode: str,
-    request_label: str,
-) -> str:
+def extract_account_output(response: Dict[str, object], account_key: str, mode: str, request_label: str) -> str:
     account_result = response.get(account_key)
     if not isinstance(account_result, dict):
         raise RuntimeError(f"Missing response for account {account_key} in {request_label}")
 
-    if mode == "dual":
-        paraphrased = account_result.get("secondMode")
-    else:
-        paraphrased = account_result.get("result")
-
+    paraphrased = account_result.get("secondMode") if mode == "dual" else account_result.get("result")
     if not paraphrased:
         error_message = account_result.get("error", "missing paraphrased output")
         raise RuntimeError(f"Account {account_key} failed in {request_label}: {error_message}")
@@ -187,20 +493,50 @@ def extract_account_output(
     return str(paraphrased)
 
 
+def recovery_account_order(preferred_account_key: str) -> List[str]:
+    ordered = [preferred_account_key] if preferred_account_key in ACCOUNT_KEYS else []
+    for key in ACCOUNT_KEYS:
+        if key not in ordered:
+            ordered.append(key)
+    return ordered
+
+
+def request_chunk_output_with_fallback(
+    *,
+    preferred_account_key: str,
+    account_items: Sequence[PptParagraph],
+    mode: str,
+    api_url: str,
+    timeout_seconds: int,
+    request_label: str,
+) -> str:
+    payload_text = build_payload_text(account_items)
+    errors: List[str] = []
+
+    for key in recovery_account_order(preferred_account_key):
+        try:
+            payload = {"mode": mode, key: payload_text}
+            response = post_batch_request(api_url, payload, timeout_seconds)
+            return extract_account_output(response, key, mode, request_label)
+        except Exception as error:  # pylint: disable=broad-except
+            errors.append(f"{key}: {error}")
+            print(f"[{request_label}] warning: recovery via {key} failed ({error})")
+
+    raise RuntimeError(
+        f"Recovery failed across all accounts for {request_label}: " + " | ".join(errors)
+    )
+
+
 def recover_account_chunk_parts(
     *,
     account_key: str,
-    account_items: Sequence[Candidate],
+    account_items: Sequence[PptParagraph],
     mode: str,
     api_url: str,
     timeout_seconds: int,
     request_label: str,
     depth: int = 0,
 ) -> List[str]:
-    """
-    Retry a problematic account chunk by recursively splitting it into smaller batches.
-    This prevents one bad delimiter parse from failing the full PPTX run.
-    """
     if not account_items:
         return []
 
@@ -224,7 +560,6 @@ def recover_account_chunk_parts(
         return [single]
 
     if depth >= 6:
-        # Hard stop for recursion depth: fall back to one-by-one requests.
         recovered: List[str] = []
         for idx, item in enumerate(account_items):
             one = recover_account_chunk_parts(
@@ -270,38 +605,11 @@ def recover_account_chunk_parts(
     return left + right
 
 
-def recovery_account_order(preferred_account_key: str) -> List[str]:
-    ordered = [preferred_account_key] if preferred_account_key in ACCOUNT_KEYS else []
-    for key in ACCOUNT_KEYS:
-        if key not in ordered:
-            ordered.append(key)
-    return ordered
-
-
-def request_chunk_output_with_fallback(
-    *,
-    preferred_account_key: str,
-    account_items: Sequence[Candidate],
-    mode: str,
-    api_url: str,
-    timeout_seconds: int,
-    request_label: str,
-) -> str:
-    payload_text = build_payload_text(account_items)
-    errors: List[str] = []
-
-    for key in recovery_account_order(preferred_account_key):
-        try:
-            payload = {"mode": mode, key: payload_text}
-            response = post_batch_request(api_url, payload, timeout_seconds)
-            return extract_account_output(response, key, mode, request_label)
-        except Exception as error:  # pylint: disable=broad-except
-            errors.append(f"{key}: {error}")
-            print(f"[{request_label}] warning: recovery via {key} failed ({error})")
-
-    raise RuntimeError(
-        f"Recovery failed across all accounts for {request_label}: " + " | ".join(errors)
-    )
+def extract_paragraphs_from_xml(root: ET.Element) -> List[ET.Element]:
+    paragraphs = root.findall(".//p:txBody/a:p", NS)
+    if paragraphs:
+        return paragraphs
+    return root.findall(".//a:txBody/a:p", NS)
 
 
 def sorted_target_xml_paths(
@@ -317,37 +625,32 @@ def sorted_target_xml_paths(
         if notes_match and include_notes:
             targets.append((name, "notes", int(notes_match.group(1))))
 
-    # Keep deterministic order: slide1, notes1, slide2, notes2, ...
     def sort_key(item: Tuple[str, str, int]) -> Tuple[int, int]:
-        path, kind, number = item
+        _, kind, number = item
         kind_rank = 0 if kind == "slide" else 1
         return number, kind_rank
 
     return sorted(targets, key=sort_key)
 
 
-def extract_candidates(
-    input_zip: zipfile.ZipFile, mode: str, include_slides: bool, include_notes: bool
-) -> Tuple[Dict[str, ET.ElementTree], List[Candidate]]:
+def collect_xml_docs_and_paragraphs(
+    input_zip: zipfile.ZipFile,
+    include_slides: bool,
+    include_notes: bool,
+) -> Tuple[Dict[str, ET.ElementTree], List[PptParagraph]]:
     xml_docs: Dict[str, ET.ElementTree] = {}
-    candidates: List[Candidate] = []
+    paragraphs: List[PptParagraph] = []
+    global_index = 0
 
-    for archive_path, kind, file_number in sorted_target_xml_paths(
-        input_zip.namelist(), include_slides, include_notes
-    ):
-        raw_xml = input_zip.read(archive_path)
-        root = ET.fromstring(raw_xml)
+    for archive_path, kind, file_number in sorted_target_xml_paths(input_zip.namelist(), include_slides, include_notes):
+        root = ET.fromstring(input_zip.read(archive_path))
         tree = ET.ElementTree(root)
         xml_docs[archive_path] = tree
 
-        # PowerPoint slide/notes text bodies are usually p:txBody with a:p children.
-        # Keep a fallback for a:txBody variants from non-standard generators.
-        paragraphs = root.findall(".//p:txBody/a:p", NS)
-        if not paragraphs:
-            paragraphs = root.findall(".//a:txBody/a:p", NS)
+        paragraph_elements = extract_paragraphs_from_xml(root)
         first_non_empty_seen = False
-        for paragraph_index, paragraph in enumerate(paragraphs):
-            text_nodes = paragraph.findall(".//a:t", NS)
+        for paragraph_index, paragraph_element in enumerate(paragraph_elements):
+            text_nodes = paragraph_element.findall(".//a:t", NS)
             if not text_nodes:
                 continue
 
@@ -355,69 +658,107 @@ def extract_candidates(
             if not text:
                 continue
 
-            words = count_words(text)
-            is_title = False
-            if kind == "slide" and not first_non_empty_seen:
-                is_title = words < 10
-            first_non_empty_seen = True
-
-            if matches_reference_header(text):
-                continue
-
-            if mode == "dual":
-                if is_title or words < 11 or text.endswith(":"):
-                    continue
-            else:
-                if words < 15:
-                    continue
-
-            candidates.append(
-                Candidate(
-                    archive_path=archive_path,
-                    kind=kind,
-                    file_number=file_number,
-                    paragraph_index=paragraph_index,
-                    text_nodes=text_nodes,
-                    original_text=text,
-                    word_count=words,
-                )
+            paragraph = PptParagraph(
+                archive_path=archive_path,
+                kind=kind,
+                file_number=file_number,
+                paragraph_index=paragraph_index,
+                global_index=global_index,
+                text_nodes=text_nodes,
+                text=text,
+                word_count=count_words(text),
+                is_first_non_empty=not first_non_empty_seen,
             )
+            paragraphs.append(paragraph)
+            first_non_empty_seen = True
+            global_index += 1
 
-    return xml_docs, candidates
-
-
-def take_request_batch(
-    remaining: deque[Candidate], max_items_per_request: int, max_words_per_request: int
-) -> List[Candidate]:
-    batch: List[Candidate] = []
-    total_words = 0
-
-    while remaining and len(batch) < max_items_per_request:
-        next_item = remaining[0]
-        if batch and (total_words + next_item.word_count > max_words_per_request):
-            break
-        batch.append(remaining.popleft())
-        total_words += next_item.word_count
-
-    if not batch and remaining:
-        batch.append(remaining.popleft())
-
-    return batch
+    return xml_docs, paragraphs
 
 
-def paraphrase_candidates(
-    candidates: List[Candidate],
+def set_paragraph_text(paragraph: PptParagraph, new_text: str) -> None:
+    if not paragraph.text_nodes:
+        return
+
+    paragraph.text_nodes[0].text = new_text
+    for node in paragraph.text_nodes[1:]:
+        node.text = ""
+
+    paragraph.text = sanitize_text(new_text)
+    paragraph.word_count = count_words(paragraph.text)
+
+
+def run_step_1_clean(paragraphs: Sequence[PptParagraph], reference_keys: Set[ParagraphKey]) -> Step1Stats:
+    cleaned_paragraphs = 0
+    removed_citations = 0
+    removed_weird_numbers = 0
+
+    for paragraph in paragraphs:
+        if not paragraph.text:
+            continue
+        if paragraph_key(paragraph) in reference_keys:
+            continue
+        if is_heading_or_subtitle(paragraph):
+            continue
+
+        new_text, citation_count, weird_count = remove_citations_and_weird_tokens(paragraph.text)
+        removed_citations += citation_count
+        removed_weird_numbers += weird_count
+        if new_text != paragraph.text:
+            set_paragraph_text(paragraph, new_text)
+            cleaned_paragraphs += 1
+
+    return Step1Stats(
+        cleaned_paragraphs=cleaned_paragraphs,
+        removed_citations=removed_citations,
+        removed_weird_numbers=removed_weird_numbers,
+    )
+
+
+def build_step_2_eligible_paragraphs(
+    paragraphs: Sequence[PptParagraph],
     mode: str,
+    reference_keys: Set[ParagraphKey],
+) -> List[PptParagraph]:
+    eligible: List[PptParagraph] = []
+    min_words = 11 if mode == "dual" else 15
+
+    for paragraph in paragraphs:
+        if not paragraph.text:
+            continue
+        if paragraph_key(paragraph) in reference_keys:
+            continue
+        if is_heading_or_subtitle(paragraph):
+            continue
+        if paragraph.word_count < min_words:
+            continue
+        if paragraph.text.endswith(":"):
+            continue
+        eligible.append(paragraph)
+
+    return eligible
+
+
+def run_step_2_paraphrase(
+    paragraphs: Sequence[PptParagraph],
+    mode: str,
+    reference_keys: Set[ParagraphKey],
     api_url: str,
     timeout_seconds: int,
     max_items_per_request: int,
     max_words_per_request: int,
-) -> None:
-    remaining = deque(candidates)
-    request_index = 0
+) -> Step2Stats:
+    eligible = build_step_2_eligible_paragraphs(paragraphs, mode, reference_keys)
+    if not eligible:
+        raise RuntimeError("No eligible slide/notes paragraphs found for paraphrasing.")
+
+    remaining = deque(eligible)
+    request_count = 0
+    updated_count = 0
+    total_words = sum(item.word_count for item in eligible)
 
     while remaining:
-        request_index += 1
+        request_count += 1
         batch = take_request_batch(remaining, max_items_per_request, max_words_per_request)
         batch_word_count = sum(item.word_count for item in batch)
         account_count = choose_account_count(batch_word_count)
@@ -428,15 +769,15 @@ def paraphrase_candidates(
             payload[account_key] = build_payload_text(account_items)
 
         print(
-            f"[request {request_index}] sending {len(batch)} paragraphs "
-            f"({batch_word_count} words) across {len(account_chunks)} account(s)"
+            f"[2/4] request {request_count}: {len(batch)} paragraphs, "
+            f"{batch_word_count} words, {len(account_chunks)} account(s)"
         )
         response = post_batch_request(api_url, payload, timeout_seconds)
 
         for account_key, account_items in account_chunks:
-            request_label = f"request {request_index} {account_key}"
+            request_label = f"request {request_count} {account_key}"
             try:
-                paraphrased = extract_account_output(response, account_key, mode, f"request {request_index}")
+                paraphrased = extract_account_output(response, account_key, mode, f"request {request_count}")
                 parts = parse_paraphrase_parts(paraphrased, len(account_items))
             except Exception as error:  # pylint: disable=broad-except
                 print(f"[{request_label}] warning: initial chunk failed ({error}); retrying with recovery")
@@ -451,33 +792,168 @@ def paraphrase_candidates(
                     timeout_seconds=timeout_seconds,
                     request_label=request_label,
                 )
+
             if len(parts) != len(account_items):
                 raise RuntimeError(
-                    f"Response count mismatch in {request_label}: "
-                    f"expected {len(account_items)}, got {len(parts)} after recovery"
+                    f"Response count mismatch in {request_label}: expected {len(account_items)}, "
+                    f"got {len(parts)} after recovery"
                 )
 
-            for candidate, new_text in zip(account_items, parts):
-                candidate.paraphrased_text = new_text.strip()
+            for paragraph, new_text in zip(account_items, parts):
+                set_paragraph_text(paragraph, new_text.strip())
+                updated_count += 1
+
+    return Step2Stats(
+        paraphrased_paragraphs=updated_count,
+        request_count=request_count,
+        total_words=total_words,
+        mode=mode,
+    )
 
 
-def apply_candidate_updates(candidates: Sequence[Candidate]) -> int:
-    updated = 0
-    for candidate in candidates:
-        if candidate.paraphrased_text is None:
+def extract_reference_entries(paragraphs: Sequence[PptParagraph], reference_keys: Set[ParagraphKey]) -> List[str]:
+    section_paragraphs = [p for p in sorted(paragraphs, key=lambda p: p.global_index) if paragraph_key(p) in reference_keys and p.text]
+    if not section_paragraphs:
+        return []
+
+    combined = "\n".join(paragraph.text for paragraph in section_paragraphs)
+    lines = split_reference_candidate_lines(combined)
+
+    entries: List[str] = []
+    for line in lines:
+        if matches_reference_header(line):
             continue
-        if not candidate.text_nodes:
+        if is_reference_like_line(line):
+            entries.append(line)
+        elif entries:
+            entries[-1] = normalize_space(entries[-1] + " " + line)
+
+    if not entries:
+        for paragraph in section_paragraphs:
+            if count_reference_like_lines(paragraph.text) > 0:
+                entries.append(paragraph.text)
+
+    deduped: List[str] = []
+    seen = set()
+    for entry in entries:
+        cleaned = normalize_space(entry)
+        if not cleaned:
             continue
-        candidate.text_nodes[0].text = candidate.paraphrased_text
-        for node in candidate.text_nodes[1:]:
-            node.text = ""
-        updated += 1
-    return updated
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(cleaned)
+
+    return deduped
 
 
-def write_output_pptx(
-    input_path: Path, output_path: Path, xml_docs: Dict[str, ET.ElementTree]
-) -> None:
+def build_citation_from_reference(reference: str, index: int) -> str:
+    cleaned = re.sub(r"^\s*(?:\d{1,3}[.)\]]|[-•])\s*", "", reference).strip(" .;:")
+    if not cleaned:
+        return f"(Source {index + 1})"
+
+    year_match = YEAR_RE.search(cleaned)
+    year = year_match.group(0) if year_match else None
+
+    prefix = cleaned[: year_match.start()] if year_match else cleaned
+    prefix = prefix.strip(" ,.;:-()[]")
+    author = ""
+    if "," in prefix:
+        author = prefix.split(",", 1)[0].strip()
+    if not author:
+        words = [w.strip(" ,.;:-()[]") for w in prefix.split() if w.strip(" ,.;:-()[]")]
+        author = " ".join(words[:4])
+
+    if not author:
+        author = f"Source {index + 1}"
+
+    if year:
+        return f"({author}, {year})"
+    return f"({author})"
+
+
+def build_step_3_eligible_paragraphs(
+    paragraphs: Sequence[PptParagraph],
+    reference_keys: Set[ParagraphKey],
+) -> List[PptParagraph]:
+    candidates: List[PptParagraph] = []
+    for paragraph in paragraphs:
+        if not paragraph.text:
+            continue
+        if paragraph_key(paragraph) in reference_keys:
+            continue
+        if is_heading_or_subtitle(paragraph):
+            continue
+        if paragraph.word_count < 11:
+            continue
+        if paragraph.text.endswith(":"):
+            continue
+        candidates.append(paragraph)
+    return candidates
+
+
+def run_step_3_add_references(paragraphs: Sequence[PptParagraph]) -> Step3Stats:
+    detection = detect_reference_section(paragraphs)
+    if detection is None:
+        raise RuntimeError(
+            "Could not detect a reference section in PPTX. "
+            "No in-text references were added."
+        )
+
+    references = extract_reference_entries(paragraphs, detection.reference_keys)
+    if not references:
+        raise RuntimeError(
+            "Reference section detected but no valid references could be parsed. "
+            "No in-text references were added."
+        )
+
+    citations = [build_citation_from_reference(ref, idx) for idx, ref in enumerate(references)]
+    if not citations:
+        raise RuntimeError("Unable to build citation labels from detected references.")
+
+    candidates = build_step_3_eligible_paragraphs(paragraphs, detection.reference_keys)
+    if not candidates:
+        raise RuntimeError("No eligible slide/notes paragraphs found for inserting references.")
+
+    target_count = min(len(candidates), max(1, len(citations)))
+    inserted_total = 0
+    inserted_slide = 0
+    inserted_notes = 0
+    citation_cursor = 0
+
+    for paragraph in candidates:
+        if inserted_total >= target_count:
+            break
+
+        citation = citations[citation_cursor % len(citations)]
+        updated_text, changed = inject_citation_into_paragraph(paragraph.text, citation)
+        if not changed:
+            continue
+
+        set_paragraph_text(paragraph, updated_text)
+        inserted_total += 1
+        citation_cursor += 1
+        if paragraph.kind == "slide":
+            inserted_slide += 1
+        else:
+            inserted_notes += 1
+
+    if inserted_total == 0:
+        raise RuntimeError(
+            "Reference section was detected, but no citations could be inserted into slide/notes paragraphs."
+        )
+
+    return Step3Stats(
+        detection_mode=detection.mode,
+        reference_count=len(references),
+        inserted_citations=inserted_total,
+        inserted_slide_paragraphs=inserted_slide,
+        inserted_notes_paragraphs=inserted_notes,
+    )
+
+
+def write_output_pptx(input_path: Path, output_path: Path, xml_docs: Dict[str, ET.ElementTree]) -> None:
     with zipfile.ZipFile(input_path, "r") as source_zip, zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as out_zip:
         for info in source_zip.infolist():
             if info.filename in xml_docs:
@@ -488,72 +964,100 @@ def write_output_pptx(
                 out_zip.writestr(info, source_zip.read(info.filename))
 
 
+def parse_mode_and_input(
+    positional: Sequence[str],
+    explicit_mode: Optional[str],
+) -> Tuple[str, Optional[Path]]:
+    mode = explicit_mode or "dual"
+    tokens = list(positional)
+
+    if tokens:
+        first = tokens[0].strip().lower()
+        if first in {"standard", "std"}:
+            mode = "standard"
+            tokens = tokens[1:]
+        elif first in {"simple", "simple+short", "simple-short", "dual", "fast"}:
+            mode = "dual"
+            tokens = tokens[1:]
+
+    input_path: Optional[Path] = None
+    if tokens:
+        input_path = Path(tokens[0])
+        tokens = tokens[1:]
+
+    if tokens:
+        raise RuntimeError(
+            "Too many positional arguments. Use: `npm run pptx`, `npm run pptx standard`, "
+            "or pass one input path."
+        )
+
+    return mode, input_path
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Paraphrase a PPTX in bulk (slides + speaker notes) and write output back to a new PPTX."
+            "PPTX one-shot pipeline: clean -> paraphrase -> add references -> output `pr <name>.pptx`."
         )
     )
     parser.add_argument(
-        "input",
-        nargs="?",
-        type=Path,
-        help="Input .pptx file path. If omitted, auto-detects a single Desktop .pptx.",
+        "positional",
+        nargs="*",
+        help="Optional mode/input. Examples: `standard`, `/path/file.pptx`, `standard /path/file.pptx`",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("dual", "standard"),
+        help="Explicit paraphrase mode (overrides positional mode token).",
     )
     parser.add_argument(
         "-o",
         "--output",
         type=Path,
-        help="Output .pptx file path (default: pr <input-name>.pptx)",
-    )
-    parser.add_argument(
-        "--mode",
-        choices=("dual", "standard"),
-        default="dual",
-        help="Paraphrase mode to request from batch API",
+        help="Output PPTX path (default: `pr <input-name>.pptx`).",
     )
     parser.add_argument(
         "--api-url",
         default=API_URL_DEFAULT,
-        help=f"Batch API URL (default: {API_URL_DEFAULT})",
+        help=f"Batch API URL (default: {API_URL_DEFAULT}).",
     )
     parser.add_argument(
         "--timeout-seconds",
         type=int,
         default=180,
-        help="HTTP timeout for each batch request",
+        help="HTTP timeout for each paraphrase batch request.",
     )
     parser.add_argument(
         "--max-items-per-request",
         type=int,
         default=120,
-        help="Max paragraphs sent in one API request",
+        help="Max paragraphs sent per paraphrase API request.",
     )
     parser.add_argument(
         "--max-words-per-request",
         type=int,
         default=2400,
-        help="Approximate max total words sent in one API request",
+        help="Approximate max total words sent per paraphrase API request.",
     )
     parser.add_argument(
         "--no-slides",
         action="store_true",
-        help="Do not paraphrase slide text boxes",
+        help="Do not process slide text.",
     )
     parser.add_argument(
         "--no-notes",
         action="store_true",
-        help="Do not paraphrase speaker notes",
+        help="Do not process speaker notes.",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Only inspect and report eligible paragraph counts; do not call API or write output",
+        help="Run detection/eligibility checks without calling paraphrase API or writing output.",
     )
     return parser.parse_args()
 
 
-def resolve_input_path(provided_input: Path | None) -> Path:
+def resolve_input_path(provided_input: Optional[Path]) -> Path:
     if provided_input is not None:
         return provided_input
 
@@ -576,18 +1080,14 @@ def resolve_input_path(provided_input: Path | None) -> Path:
         lower_name = path.name.lower()
         if lower_name.startswith("pr "):
             original_name = path.name[3:]
-            # Treat "pr <name>.pptx" as generated output only when "<name>.pptx"
-            # exists on Desktop in the same moment.
             if original_name.lower() in existing_names:
                 continue
         candidates.append(path)
 
     candidates = sorted(candidates)
-
     if len(candidates) == 1:
         print(f"Auto-selected Desktop file: {candidates[0]}")
         return candidates[0]
-
     if len(candidates) == 0:
         raise RuntimeError(
             f"No .pptx file found on Desktop ({desktop}). Put one file there or pass the path explicitly."
@@ -603,8 +1103,10 @@ def resolve_input_path(provided_input: Path | None) -> Path:
 
 def main() -> int:
     args = parse_args()
+
     try:
-        input_path = resolve_input_path(args.input)
+        mode, provided_input = parse_mode_and_input(args.positional, args.mode)
+        input_path = resolve_input_path(provided_input)
     except RuntimeError as error:
         print(str(error), file=sys.stderr)
         return 1
@@ -622,47 +1124,137 @@ def main() -> int:
         print("Nothing to do: both slides and notes are disabled.", file=sys.stderr)
         return 1
 
-    output_path = (
-        args.output
-        if args.output
-        else input_path.with_name(f"pr {input_path.name}")
+    output_path = args.output if args.output else input_path.with_name(f"pr {input_path.name}")
+
+    try:
+        with zipfile.ZipFile(input_path, "r") as input_zip:
+            xml_docs, paragraphs = collect_xml_docs_and_paragraphs(
+                input_zip=input_zip,
+                include_slides=include_slides,
+                include_notes=include_notes,
+            )
+    except Exception as error:  # pylint: disable=broad-except
+        print(f"Failed to read PPTX: {error}", file=sys.stderr)
+        return 1
+
+    if not paragraphs:
+        print("No eligible text containers found in the presentation XML.", file=sys.stderr)
+        return 1
+
+    slide_count = sum(1 for paragraph in paragraphs if paragraph.kind == "slide")
+    notes_count = sum(1 for paragraph in paragraphs if paragraph.kind == "notes")
+    total_words = sum(paragraph.word_count for paragraph in paragraphs)
+    print(
+        f"Collected paragraphs: total={len(paragraphs)}, slide={slide_count}, "
+        f"notes={notes_count}, words={total_words}"
     )
 
-    with zipfile.ZipFile(input_path, "r") as input_zip:
-        xml_docs, candidates = extract_candidates(
-            input_zip=input_zip,
-            mode=args.mode,
-            include_slides=include_slides,
-            include_notes=include_notes,
+    initial_detection = detect_reference_section(paragraphs)
+    reference_keys = initial_detection.reference_keys if initial_detection else set()
+    if initial_detection is None:
+        print(
+            "Reference detection (initial): missing. Step 3 will fail-safe if references cannot be detected.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"Reference detection (initial): mode={initial_detection.mode}, "
+            f"reference_paragraphs={len(initial_detection.reference_keys)}"
         )
 
-    slide_count = sum(1 for c in candidates if c.kind == "slide")
-    notes_count = sum(1 for c in candidates if c.kind == "notes")
-    total_words = sum(c.word_count for c in candidates)
-    print(
-        f"Eligible paragraphs: total={len(candidates)}, slide={slide_count}, notes={notes_count}, words={total_words}"
-    )
+    print("[1/4] Clean (weird numbers + in-text citations, keep headings/subtitles) ...", flush=True)
+    try:
+        step1 = run_step_1_clean(paragraphs, reference_keys)
+        print(
+            "[1/4] OK"
+            f" | updated_paragraphs={step1.cleaned_paragraphs}"
+            f", removed_citations={step1.removed_citations}"
+            f", removed_weird_numbers={step1.removed_weird_numbers}"
+        )
+    except Exception as error:  # pylint: disable=broad-except
+        print(f"[1/4] FAILED: {error}", file=sys.stderr)
+        return 1
 
-    if not candidates:
-        print("No eligible text found. Exiting without output changes.")
-        return 0
+    print(f"[2/4] Paraphrase ({'SIMPLE+SHORT' if mode == 'dual' else 'STANDARD'}) ...", flush=True)
+    try:
+        if args.dry_run:
+            eligible = build_step_2_eligible_paragraphs(paragraphs, mode, reference_keys)
+            if not eligible:
+                raise RuntimeError("No eligible slide/notes paragraphs found for paraphrasing.")
+            print(f"[2/4] DRY-RUN OK | eligible_paragraphs={len(eligible)}, mode={mode}")
+        else:
+            step2 = run_step_2_paraphrase(
+                paragraphs=paragraphs,
+                mode=mode,
+                reference_keys=reference_keys,
+                api_url=args.api_url,
+                timeout_seconds=args.timeout_seconds,
+                max_items_per_request=args.max_items_per_request,
+                max_words_per_request=args.max_words_per_request,
+            )
+            print(
+                "[2/4] OK"
+                f" | paraphrased_paragraphs={step2.paraphrased_paragraphs}"
+                f", requests={step2.request_count}"
+                f", words={step2.total_words}"
+                f", mode={step2.mode}"
+            )
+    except Exception as error:  # pylint: disable=broad-except
+        print(f"[2/4] FAILED: {error}", file=sys.stderr)
+        return 1
+
+    print("[3/4] Add new in-text references (slides + speaker notes) ...", flush=True)
+    try:
+        if args.dry_run:
+            detection = detect_reference_section(paragraphs)
+            if detection is None:
+                raise RuntimeError("Could not detect a reference section for citation insertion.")
+            references = extract_reference_entries(paragraphs, detection.reference_keys)
+            if not references:
+                raise RuntimeError("Reference section found, but no usable references were parsed.")
+            candidates = build_step_3_eligible_paragraphs(paragraphs, detection.reference_keys)
+            if not candidates:
+                raise RuntimeError("No eligible slide/notes paragraphs found for inserting references.")
+            print(
+                "[3/4] DRY-RUN OK"
+                f" | detection={detection.mode}"
+                f", references={len(references)}"
+                f", eligible_targets={len(candidates)}"
+            )
+        else:
+            step3 = run_step_3_add_references(paragraphs)
+            print(
+                "[3/4] OK"
+                f" | detection={step3.detection_mode}"
+                f", parsed_references={step3.reference_count}"
+                f", inserted_citations={step3.inserted_citations}"
+                f", inserted_slide={step3.inserted_slide_paragraphs}"
+                f", inserted_notes={step3.inserted_notes_paragraphs}"
+            )
+    except Exception as error:  # pylint: disable=broad-except
+        print(
+            "[3/4] FAILED: "
+            f"{error}\n"
+            "No output file was written. Review references formatting before sending this presentation.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("[4/4] Write output PPTX ...", flush=True)
+    try:
+        if args.dry_run:
+            print("[4/4] DRY-RUN OK | no file written")
+        else:
+            write_output_pptx(input_path, output_path, xml_docs)
+            print(f"[4/4] OK | output={output_path}")
+    except Exception as error:  # pylint: disable=broad-except
+        print(f"[4/4] FAILED: {error}", file=sys.stderr)
+        return 1
 
     if args.dry_run:
-        print("Dry run complete.")
-        return 0
-
-    paraphrase_candidates(
-        candidates=candidates,
-        mode=args.mode,
-        api_url=args.api_url,
-        timeout_seconds=args.timeout_seconds,
-        max_items_per_request=args.max_items_per_request,
-        max_words_per_request=args.max_words_per_request,
-    )
-
-    updated = apply_candidate_updates(candidates)
-    write_output_pptx(input_path, output_path, xml_docs)
-    print(f"Done. Updated {updated} paragraphs. Output: {output_path}")
+        print("Pipeline dry-run completed successfully.")
+    else:
+        print("Pipeline completed successfully.")
     return 0
 
 
