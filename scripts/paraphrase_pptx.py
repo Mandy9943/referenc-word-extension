@@ -33,6 +33,7 @@ MODE_COORDINATION_PENALTY_SECONDS = {"dual": 1.2, "standard": 0.7, "ludicrous": 
 MODE_RATE_SUFFIX = {"dual": "Dual", "standard": "Standard", "ludicrous": "Ludicrous"}
 
 ZERO_WIDTH_RE = re.compile(r"[\u200B-\u200D\uFEFF]")
+XML_INVALID_CHAR_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
 SLIDE_XML_RE = re.compile(r"^ppt/slides/slide(\d+)\.xml$")
 NOTES_XML_RE = re.compile(r"^ppt/notesSlides/notesSlide(\d+)\.xml$")
 
@@ -107,6 +108,7 @@ LINK_PATTERNS = [
     re.compile(r"\bwww\.[^\s)\]}]+", re.IGNORECASE),
     re.compile(r"\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/[^\s)\]}]*)?", re.IGNORECASE),
 ]
+XMLNS_DECLARATION_RE = re.compile(r"""xmlns(?::([A-Za-z_][\w.\-]*))?\s*=\s*(['"])(.*?)\2""")
 
 ParagraphKey = Tuple[str, int]
 
@@ -161,10 +163,89 @@ def sanitize_text(text: str) -> str:
     return ZERO_WIDTH_RE.sub("", text or "").strip()
 
 
+def sanitize_xml_text(text: str) -> str:
+    return XML_INVALID_CHAR_RE.sub("", text or "")
+
+
 def local_name(tag_name: str) -> str:
     if "}" in tag_name:
         return tag_name.rsplit("}", 1)[1]
     return tag_name
+
+
+def register_metadata_namespaces() -> None:
+    ET.register_namespace("cp", "http://schemas.openxmlformats.org/package/2006/metadata/core-properties")
+    ET.register_namespace("dc", "http://purl.org/dc/elements/1.1/")
+    ET.register_namespace("dcterms", "http://purl.org/dc/terms/")
+    ET.register_namespace("dcmitype", "http://purl.org/dc/dcmitype/")
+    ET.register_namespace("xsi", "http://www.w3.org/2001/XMLSchema-instance")
+    ET.register_namespace("ep", "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties")
+    ET.register_namespace("vt", "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes")
+    ET.register_namespace("p", "http://schemas.openxmlformats.org/presentationml/2006/main")
+
+
+def inject_missing_namespace_declarations(xml_text: str, declarations: Dict[str, str]) -> str:
+    if not declarations:
+        return xml_text
+
+    root_match = re.search(r"<([A-Za-z_][\w.:-]*)([^>]*)>", xml_text)
+    if not root_match:
+        return xml_text
+
+    root_tag = root_match.group(0)
+    attrs = root_match.group(2) or ""
+    existing: Dict[Optional[str], str] = {}
+    for match in XMLNS_DECLARATION_RE.finditer(attrs):
+        prefix = match.group(1) if match.group(1) else None
+        existing[prefix] = match.group(3)
+
+    additions: List[str] = []
+    for prefix, uri in declarations.items():
+        if not prefix:
+            continue
+        if existing.get(prefix) == uri:
+            continue
+        if uri in existing.values():
+            continue
+        additions.append(f' xmlns:{prefix}="{uri}"')
+
+    if not additions:
+        return xml_text
+
+    updated_root_tag = root_tag[:-1] + "".join(additions) + ">"
+    return xml_text[: root_match.start()] + updated_root_tag + xml_text[root_match.end() :]
+
+
+def normalize_dcterms_xsi_type_prefix(xml_text: str) -> str:
+    qname_match = re.search(r"""xsi:type=(["'])dcterms:W3CDTF\1""", xml_text)
+    if not qname_match or "xmlns:dcterms=" in xml_text:
+        return xml_text
+
+    root_match = re.search(r"<([A-Za-z_][\w.:-]*)([^>]*)>", xml_text)
+    if not root_match:
+        return xml_text
+
+    attrs = root_match.group(2) or ""
+    mapped_prefix: Optional[str] = None
+    for match in XMLNS_DECLARATION_RE.finditer(attrs):
+        prefix = match.group(1)
+        uri = match.group(3)
+        if prefix and uri == "http://purl.org/dc/terms/":
+            mapped_prefix = prefix
+            break
+
+    if mapped_prefix:
+        quote = qname_match.group(1)
+        return re.sub(
+            r"""xsi:type=(["'])dcterms:W3CDTF\1""",
+            f'xsi:type={quote}{mapped_prefix}:W3CDTF{quote}',
+            xml_text,
+            count=1,
+        )
+
+    updated_root_tag = root_match.group(0)[:-1] + ' xmlns:dcterms="http://purl.org/dc/terms/">'
+    injected = xml_text[: root_match.start()] + updated_root_tag + xml_text[root_match.end() :]
+    return injected
 
 
 def scrub_pptx_metadata_xml(path_name: str, xml_bytes: bytes) -> bytes:
@@ -236,9 +317,18 @@ def scrub_pptx_metadata_xml(path_name: str, xml_bytes: bytes) -> bytes:
                     elem.set(attr_name, "")
 
     if not changed:
+        if path_name == "docProps/core.xml":
+            normalized = normalize_dcterms_xsi_type_prefix(
+                xml_bytes.decode("utf-8", errors="replace")
+            )
+            if normalized.encode("utf-8") != xml_bytes:
+                return normalized.encode("utf-8")
         return xml_bytes
 
-    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    register_metadata_namespaces()
+    xml_text = ET.tostring(root, encoding="utf-8", xml_declaration=True).decode("utf-8")
+    xml_text = normalize_dcterms_xsi_type_prefix(xml_text)
+    return xml_text.encode("utf-8")
 
 
 def normalize_space(text: str) -> str:
@@ -973,11 +1063,12 @@ def set_paragraph_text(paragraph: PptParagraph, new_text: str) -> None:
     if not paragraph.text_nodes:
         return
 
-    paragraph.text_nodes[0].text = new_text
+    safe_text = sanitize_xml_text(new_text)
+    paragraph.text_nodes[0].text = safe_text
     for node in paragraph.text_nodes[1:]:
         node.text = ""
 
-    paragraph.text = sanitize_text(new_text)
+    paragraph.text = sanitize_text(safe_text)
     paragraph.word_count = count_words(paragraph.text)
 
 
