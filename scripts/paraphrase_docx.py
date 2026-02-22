@@ -29,6 +29,7 @@ ACCOUNT_KEYS = ("acc1", "acc2", "acc3")
 MODE_DEFAULT_BUDGET = {"dual": 520.0, "standard": 950.0, "ludicrous": 600.0}
 MODE_TARGET_SECONDS = {"dual": 18.0, "standard": 9.0, "ludicrous": 16.0}
 MODE_MIN_WORDS_PER_ACCOUNT = {"dual": 280.0, "standard": 500.0, "ludicrous": 300.0}
+MODE_MAX_WORDS_PER_ACCOUNT = {"dual": 760, "standard": 1400, "ludicrous": 900}
 MODE_COORDINATION_PENALTY_SECONDS = {"dual": 1.2, "standard": 0.7, "ludicrous": 1.0}
 MODE_RATE_SUFFIX = {"dual": "Dual", "standard": "Standard", "ludicrous": "Ludicrous"}
 
@@ -814,15 +815,19 @@ def split_into_account_chunks(
     if not accounts:
         accounts = [ACCOUNT_KEYS[0]]
 
-    account_count = len(accounts)
-    chunk_size = math.ceil(len(items) / account_count)
+    # Balance by words (not item count) so one account does not get a huge
+    # paragraph while others stay nearly idle.
+    buckets: Dict[str, List[ParaphraseItem]] = {account_key: [] for account_key in accounts}
+    bucket_words: Dict[str, int] = {account_key: 0 for account_key in accounts}
+
+    for item in items:
+        target = min(accounts, key=lambda key: (bucket_words[key], len(buckets[key])))
+        buckets[target].append(item)
+        bucket_words[target] += item.word_count
+
     chunks: List[Tuple[str, List[ParaphraseItem]]] = []
-    for i, account_key in enumerate(accounts):
-        start = i * chunk_size
-        end = min(start + chunk_size, len(items))
-        if start >= len(items):
-            break
-        section = list(items[start:end])
+    for account_key in accounts:
+        section = buckets[account_key]
         if section:
             chunks.append((account_key, section))
     return chunks
@@ -1253,6 +1258,28 @@ def run_step_2_paraphrase(
             mode,
             scheduler_snapshot,
         )
+
+        # Guardrail: when only one account is currently usable, keep request size
+        # within per-account bounds to avoid long click/retry failure storms.
+        if len(selected_accounts) == 1 and len(batch) > 1:
+            max_single_account_words = MODE_MAX_WORDS_PER_ACCOUNT.get(mode, max_words_per_request)
+            if batch_words > max_single_account_words:
+                original_count = len(batch)
+                while len(batch) > 1 and batch_words > max_single_account_words:
+                    moved = batch.pop()
+                    batch_words -= moved.word_count
+                    cursor -= 1
+
+                _account_count, estimated_seconds, selected_accounts, effective_capacity = choose_account_plan(
+                    batch_words,
+                    mode,
+                    scheduler_snapshot,
+                )
+                print(
+                    f"[2/4] request {request_count}: single-account guard trimmed "
+                    f"{original_count}->{len(batch)} paragraphs ({batch_words} words)"
+                )
+
         account_chunks = split_into_account_chunks(batch, selected_accounts)
 
         payload: Dict[str, str] = {"mode": mode}
