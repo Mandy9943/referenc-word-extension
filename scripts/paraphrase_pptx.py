@@ -1130,15 +1130,40 @@ def run_step_3_add_references(paragraphs: Sequence[PptParagraph]) -> Step3Stats:
     if not candidates:
         raise RuntimeError("No eligible slide/notes paragraphs found for inserting references.")
 
+    notes_candidates = [paragraph for paragraph in candidates if paragraph.kind == "notes"]
     target_count = min(len(candidates), max(1, len(citations)))
     inserted_total = 0
     inserted_slide = 0
     inserted_notes = 0
     citation_cursor = 0
+    inserted_keys: Set[ParagraphKey] = set()
+
+    # Ensure notes get at least one citation when eligible notes paragraphs exist.
+    if notes_candidates:
+        note_inserted = False
+        for paragraph in notes_candidates:
+            citation = citations[citation_cursor % len(citations)]
+            updated_text, changed = inject_citation_into_paragraph(paragraph.text, citation)
+            if not changed:
+                continue
+            set_paragraph_text(paragraph, updated_text)
+            inserted_total += 1
+            inserted_notes += 1
+            citation_cursor += 1
+            inserted_keys.add(paragraph_key(paragraph))
+            note_inserted = True
+            break
+
+        if not note_inserted:
+            raise RuntimeError(
+                "Speaker notes were detected but no in-text citation could be inserted into eligible notes paragraphs."
+            )
 
     for paragraph in candidates:
         if inserted_total >= target_count:
             break
+        if paragraph_key(paragraph) in inserted_keys:
+            continue
 
         citation = citations[citation_cursor % len(citations)]
         updated_text, changed = inject_citation_into_paragraph(paragraph.text, citation)
@@ -1156,6 +1181,10 @@ def run_step_3_add_references(paragraphs: Sequence[PptParagraph]) -> Step3Stats:
     if inserted_total == 0:
         raise RuntimeError(
             "Reference section was detected, but no citations could be inserted into slide/notes paragraphs."
+        )
+    if notes_candidates and inserted_notes == 0:
+        raise RuntimeError(
+            "Reference section was detected, but no citations were inserted into speaker notes paragraphs."
         )
 
     return Step3Stats(
@@ -1201,7 +1230,7 @@ def parse_mode_and_input(
 
     if tokens:
         raise RuntimeError(
-            "Too many positional arguments. Use: `npm run pptx`, `npm run pptx standard`, "
+            "Too many positional arguments. Use: `npm run ppt`, `npm run ppt standard`, "
             "or pass one input path."
         )
 

@@ -170,10 +170,10 @@ Commands:
 
 ```bash
 # SIMPLE+SHORT mode
-npm run pptx
+npm run ppt
 
 # STANDARD mode
-npm run pptx standard
+npm run ppt standard
 ```
 
 Input behavior:
