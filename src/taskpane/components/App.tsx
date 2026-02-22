@@ -426,7 +426,7 @@ const App: React.FC = () => {
               className={styles.button}
               style={{ backgroundColor: "#d67f2dff", color: "#fff" }}
             >
-              LUDICROUS
+              SIMPLE + SHORT
             </Button>
             <Button
               appearance="secondary"
@@ -478,7 +478,7 @@ const App: React.FC = () => {
                   marginTop: "-8px",
                 }}
               >
-                PowerPoint tip: click in Speaker Notes and press Cmd/Ctrl+A, then click LUDICROUS or STANDARD.
+                PowerPoint tip: click in Speaker Notes and press Cmd/Ctrl+A, then click SIMPLE + SHORT or STANDARD.
                 <br />
                 One-click ALL SLIDES currently paraphrases slide text boxes in bulk.
               </Text>
