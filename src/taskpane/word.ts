@@ -1,6 +1,7 @@
 /* global Word console, fetch, AbortController, setTimeout, clearTimeout */
 import { calculateTextChangeMetrics } from "./changeMetrics";
 import { getFormattedReferences } from "./gemini";
+import { chooseAdaptiveAccountCount, type HealthSnapshot } from "./accountSelection";
 
 // ==================== Batch API Configuration ====================
 const BATCH_API_URL = "https://analizeai.com/paraphrase-batch";
@@ -32,11 +33,12 @@ export interface ParaphraseResult {
 
 // Health check response type
 interface HealthCheckResponse {
-  status: string;
-  acc1?: { status: string };
-  acc2?: { status: string };
-  acc3?: { status: string };
+  status?: string;
   ready?: boolean;
+  scheduler?: HealthSnapshot["scheduler"];
+  acc1?: HealthSnapshot["acc1"];
+  acc2?: HealthSnapshot["acc2"];
+  acc3?: HealthSnapshot["acc3"];
 }
 
 // Batch API response types
@@ -59,7 +61,11 @@ interface BatchApiResponse {
  * Check service health with a 2-second timeout.
  * Returns warnings for accounts that are not ready, but never throws.
  */
-async function checkServiceHealth(): Promise<{ ready: boolean; warnings: string[] }> {
+async function checkServiceHealth(): Promise<{
+  ready: boolean;
+  warnings: string[];
+  statusData?: HealthCheckResponse;
+}> {
   const warnings: string[] = [];
 
   try {
@@ -75,7 +81,7 @@ async function checkServiceHealth(): Promise<{ ready: boolean; warnings: string[
 
     if (!response.ok) {
       warnings.push(`Health check returned status ${response.status}`);
-      return { ready: false, warnings };
+      return { ready: false, warnings, statusData: undefined };
     }
 
     const data: HealthCheckResponse = await response.json();
@@ -88,14 +94,14 @@ async function checkServiceHealth(): Promise<{ ready: boolean; warnings: string[
       }
     }
 
-    return { ready: data.ready ?? true, warnings };
+    return { ready: data.ready ?? true, warnings, statusData: data };
   } catch (error) {
     if (error.name === "AbortError") {
       warnings.push("Health check timed out (service may be slow)");
     } else {
       warnings.push(`Health check failed: ${error.message}`);
     }
-    return { ready: false, warnings };
+    return { ready: false, warnings, statusData: undefined };
   }
 }
 
@@ -1138,15 +1144,17 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
       const originalPreview = metas.length > 0 ? metas[0].text.substring(0, 50) + "..." : "";
       console.log(`Total word count: ${originalWordCount}`);
 
-      // Determine number of accounts to use based on word count
-      let numAccounts = 1;
-      if (originalWordCount > 1500) {
-        numAccounts = 3;
-      } else if (originalWordCount >= 500) {
-        numAccounts = 2;
-      }
-
-      console.log(`Using ${numAccounts} account(s) for processing via batch API`);
+      const selection = chooseAdaptiveAccountCount(
+        originalWordCount,
+        "dual",
+        healthResult.statusData
+      );
+      const numAccounts = selection.count;
+      console.log(
+        `Using ${numAccounts} account(s) for processing via batch API (mode=dual, est=${selection.estimatedSeconds.toFixed(
+          1
+        )}s, accounts=${selection.accounts.join("/")}, capacity=${Math.round(selection.effectiveCapacity)})`
+      );
 
       // Build payloads helper
       const buildPayload = (metaArray: ParaphraseParagraphMeta[]) => {
@@ -1634,15 +1642,17 @@ async function paraphraseDocumentSinglePass(mode: SinglePassMode): Promise<Parap
       const originalPreview = metas.length > 0 ? metas[0].text.substring(0, 50) + "..." : "";
       console.log(`Total word count: ${originalWordCount}`);
 
-      // Determine number of accounts to use based on word count
-      let numAccounts = 1;
-      if (originalWordCount > 1500) {
-        numAccounts = 3;
-      } else if (originalWordCount >= 500) {
-        numAccounts = 2;
-      }
-
-      console.log(`Using ${numAccounts} account(s) for processing via batch API`);
+      const selection = chooseAdaptiveAccountCount(
+        originalWordCount,
+        mode,
+        healthResult.statusData
+      );
+      const numAccounts = selection.count;
+      console.log(
+        `Using ${numAccounts} account(s) for processing via batch API (mode=${mode}, est=${selection.estimatedSeconds.toFixed(
+          1
+        )}s, accounts=${selection.accounts.join("/")}, capacity=${Math.round(selection.effectiveCapacity)})`
+      );
 
       // Build payloads helper
       const buildPayload = (metaArray: ParaphraseParagraphMeta[]) => {

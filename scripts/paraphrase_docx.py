@@ -21,11 +21,16 @@ import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 API_URL_DEFAULT = "https://analizeai.com/paraphrase-batch"
 PARAPHRASE_DELIMITER = "qbpdelim123"
 ACCOUNT_KEYS = ("acc1", "acc2", "acc3")
+MODE_DEFAULT_BUDGET = {"dual": 520.0, "standard": 950.0, "ludicrous": 600.0}
+MODE_TARGET_SECONDS = {"dual": 18.0, "standard": 9.0, "ludicrous": 16.0}
+MODE_MIN_WORDS_PER_ACCOUNT = {"dual": 280.0, "standard": 500.0, "ludicrous": 300.0}
+MODE_COORDINATION_PENALTY_SECONDS = {"dual": 1.2, "standard": 0.7, "ludicrous": 1.0}
+MODE_RATE_SUFFIX = {"dual": "Dual", "standard": "Standard", "ludicrous": "Ludicrous"}
 
 NS = {
     "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
@@ -422,12 +427,198 @@ def inject_missing_namespace_declarations(xml_text: str, declarations: Dict[str,
     return xml_text[: root_match.start()] + updated_root_tag + xml_text[root_match.end() :]
 
 
-def choose_account_count(total_words: int) -> int:
-    if total_words > 1500:
-        return 3
-    if total_words >= 500:
-        return 2
-    return 1
+def clamp(value: float, min_value: float, max_value: float) -> float:
+    return max(min_value, min(max_value, value))
+
+
+def status_url_from_api(api_url: str) -> str:
+    marker = "/paraphrase-batch"
+    if api_url.endswith(marker):
+        return api_url[: -len(marker)] + "/health"
+    if api_url.endswith("/"):
+        return api_url + "health"
+    return api_url + "/health"
+
+
+def fetch_health_snapshot(api_url: str, timeout_seconds: int) -> Optional[Dict[str, Any]]:
+    url = status_url_from_api(api_url)
+    request = urllib.request.Request(url, method="GET")
+    timeout = max(2, min(timeout_seconds, 10))
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = response.read().decode("utf-8", errors="replace")
+            if response.status < 200 or response.status >= 300:
+                return None
+            data = json.loads(payload)
+            return data if isinstance(data, dict) else None
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        return None
+
+
+def get_available_accounts(snapshot: Optional[Dict[str, Any]]) -> List[str]:
+    if not isinstance(snapshot, dict):
+        return list(ACCOUNT_KEYS)
+
+    ready_accounts: List[str] = []
+    for account_key in ACCOUNT_KEYS:
+        account_data = snapshot.get(account_key)
+        status = ""
+        if isinstance(account_data, dict):
+            status = str(account_data.get("status", "")).lower()
+        if not status or status in ("ready", "ok"):
+            ready_accounts.append(account_key)
+
+    if not ready_accounts:
+        return [ACCOUNT_KEYS[0]]
+
+    scheduler = snapshot.get("scheduler")
+    scheduler_accounts = scheduler.get("accounts") if isinstance(scheduler, dict) else None
+    if not isinstance(scheduler_accounts, dict):
+        return ready_accounts
+
+    non_tripped: List[str] = []
+    for account_key in ready_accounts:
+        account_stats = scheduler_accounts.get(account_key)
+        health = str(account_stats.get("health", "")).lower() if isinstance(account_stats, dict) else ""
+        if health != "tripped":
+            non_tripped.append(account_key)
+
+    if non_tripped:
+        return non_tripped
+    return [ready_accounts[0]]
+
+
+def get_raw_budget(snapshot: Optional[Dict[str, Any]], account_key: str, mode: str) -> float:
+    if not isinstance(snapshot, dict):
+        return MODE_DEFAULT_BUDGET[mode]
+
+    scheduler = snapshot.get("scheduler")
+    if not isinstance(scheduler, dict):
+        return MODE_DEFAULT_BUDGET[mode]
+
+    budgets = scheduler.get("recommendedBudgets")
+    if not isinstance(budgets, dict):
+        return MODE_DEFAULT_BUDGET[mode]
+
+    per_account = budgets.get("perAccount")
+    if isinstance(per_account, dict):
+        per_account_budget = per_account.get(account_key)
+        if isinstance(per_account_budget, dict):
+            value = per_account_budget.get(mode)
+            if isinstance(value, (int, float)) and value > 0:
+                return float(value)
+
+    global_value = budgets.get(mode)
+    if isinstance(global_value, (int, float)) and global_value > 0:
+        return float(global_value)
+    return MODE_DEFAULT_BUDGET[mode]
+
+
+def get_reliability_factor(snapshot: Optional[Dict[str, Any]], account_key: str, mode: str) -> float:
+    if not isinstance(snapshot, dict):
+        return 1.0
+
+    scheduler = snapshot.get("scheduler")
+    if not isinstance(scheduler, dict):
+        return 1.0
+
+    accounts = scheduler.get("accounts")
+    if not isinstance(accounts, dict):
+        return 1.0
+
+    account_stats = accounts.get(account_key)
+    if not isinstance(account_stats, dict):
+        return 1.0
+
+    suffix = MODE_RATE_SUFFIX[mode]
+    success_rate = account_stats.get(f"successRate{suffix}")
+    retry_rate = account_stats.get(f"retryRate{suffix}")
+    timeout_rate = account_stats.get(f"timeoutRate{suffix}")
+
+    success = float(success_rate) if isinstance(success_rate, (int, float)) else 1.0
+    retry = float(retry_rate) if isinstance(retry_rate, (int, float)) else 0.0
+    timeout = float(timeout_rate) if isinstance(timeout_rate, (int, float)) else 0.0
+
+    rate_factor = clamp(success - retry * 0.45 - timeout * 0.8, 0.4, 1.05)
+
+    health = str(account_stats.get("health", "")).lower()
+    health_factor = 1.0
+    if health == "degraded":
+        health_factor = 0.8
+    elif health == "tripped":
+        health_factor = 0.35
+
+    return clamp(rate_factor * health_factor, 0.35, 1.05)
+
+
+def get_system_penalty_seconds(snapshot: Optional[Dict[str, Any]], account_count: int) -> float:
+    if account_count <= 1 or not isinstance(snapshot, dict):
+        return 0.0
+
+    scheduler = snapshot.get("scheduler")
+    if not isinstance(scheduler, dict):
+        return 0.0
+
+    rolling = scheduler.get("rolling")
+    if not isinstance(rolling, dict):
+        return 0.0
+
+    success_ratio_value = rolling.get("successRatio")
+    fallback_rate_value = rolling.get("fallbackRate")
+    success_ratio = float(success_ratio_value) if isinstance(success_ratio_value, (int, float)) else 1.0
+    fallback_rate = float(fallback_rate_value) if isinstance(fallback_rate_value, (int, float)) else 0.0
+    success_ratio = clamp(success_ratio, 0.0, 1.0)
+    fallback_rate = clamp(fallback_rate, 0.0, 1.0)
+
+    return (fallback_rate * 4.0 + (1.0 - success_ratio) * 6.0) * (account_count - 1)
+
+
+def choose_account_plan(total_words: int, mode: str, snapshot: Optional[Dict[str, Any]]) -> Tuple[int, float, List[str], float]:
+    if total_words <= 0:
+        return 1, 0.0, [ACCOUNT_KEYS[0]], MODE_DEFAULT_BUDGET[mode]
+
+    available_accounts = get_available_accounts(snapshot)
+    profiles: List[Tuple[str, float]] = []
+    for account_key in available_accounts:
+        raw_budget = get_raw_budget(snapshot, account_key, mode)
+        reliability = get_reliability_factor(snapshot, account_key, mode)
+        effective_budget = max(120.0, raw_budget * reliability)
+        profiles.append((account_key, effective_budget))
+
+    profiles.sort(key=lambda item: item[1], reverse=True)
+    if not profiles:
+        return 1, (total_words / MODE_DEFAULT_BUDGET[mode]) * MODE_TARGET_SECONDS[mode], [ACCOUNT_KEYS[0]], MODE_DEFAULT_BUDGET[mode]
+
+    best_count = 1
+    best_estimated = float("inf")
+    best_accounts = [profiles[0][0]]
+    best_capacity = profiles[0][1]
+    min_words_per_account = MODE_MIN_WORDS_PER_ACCOUNT[mode]
+    max_count_by_words = max(1, int(total_words // min_words_per_account))
+    max_candidate_count = min(len(profiles), max_count_by_words)
+
+    for count in range(1, max_candidate_count + 1):
+        selected = profiles[:count]
+        capacity = max(100.0, sum(item[1] for item in selected))
+        estimated = (total_words / capacity) * MODE_TARGET_SECONDS[mode]
+        estimated += (count - 1) * MODE_COORDINATION_PENALTY_SECONDS[mode]
+        estimated += get_system_penalty_seconds(snapshot, count)
+
+        if count == 1:
+            best_count = count
+            best_estimated = estimated
+            best_accounts = [item[0] for item in selected]
+            best_capacity = capacity
+            continue
+
+        if estimated + 0.9 < best_estimated:
+            best_count = count
+            best_estimated = estimated
+            best_accounts = [item[0] for item in selected]
+            best_capacity = capacity
+
+    return best_count, best_estimated, best_accounts, best_capacity
 
 
 def parse_paraphrase_parts(text: str, expected_count: int) -> List[str]:
@@ -881,11 +1072,16 @@ def run_step_2_paraphrase(
     cursor = 0
     total_words = sum(item.word_count for item in items)
     paragraph_by_index = {p.index: p for p in paragraphs}
+    scheduler_snapshot = fetch_health_snapshot(api_url, timeout_seconds)
 
     while cursor < len(items):
         request_count += 1
         batch, cursor, batch_words = take_request_batch(items, cursor, max_items_per_request, max_words_per_request)
-        account_count = choose_account_count(batch_words)
+        account_count, estimated_seconds, selected_accounts, effective_capacity = choose_account_plan(
+            batch_words,
+            mode,
+            scheduler_snapshot,
+        )
         account_chunks = split_into_account_chunks(batch, account_count)
 
         payload: Dict[str, str] = {"mode": mode}
@@ -894,6 +1090,7 @@ def run_step_2_paraphrase(
 
         print(
             f"[2/4] request {request_count}: {len(batch)} paragraphs, {batch_words} words, {len(account_chunks)} account(s)"
+            f" | est={estimated_seconds:.1f}s | accounts={'/'.join(selected_accounts)} | capacity={effective_capacity:.0f}"
         )
         response = post_batch_request(api_url, payload, timeout_seconds)
 
