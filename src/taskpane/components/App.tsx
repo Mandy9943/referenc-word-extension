@@ -10,7 +10,6 @@ import {
   paraphraseAllSlides,
   paraphraseAllSlidesLudicrous,
   paraphraseAllSlidesStandard,
-  paraphraseSelectedText,
   paraphraseSelectedTextLudicrous,
   paraphraseSelectedTextStandard,
   removeLinks,
@@ -240,10 +239,6 @@ const App: React.FC = () => {
     }
   };
 
-  const handleParaphraseText = async () => {
-    await runParaphraseAction(paraphraseSelectedText);
-  };
-
   const handleParaphraseTextStandard = async () => {
     await runParaphraseAction(paraphraseSelectedTextStandard);
   };
@@ -426,12 +421,12 @@ const App: React.FC = () => {
             </Button>
             <Button
               appearance="secondary"
-              onClick={handleParaphraseText}
+              onClick={handleParaphraseTextLudicrous}
               disabled={status === "loading"}
               className={styles.button}
-              style={{ backgroundColor: "#7d7fd6ff" }}
+              style={{ backgroundColor: "#d67f2dff", color: "#fff" }}
             >
-              SIMPLE + SHORT
+              LUDICROUS
             </Button>
             <Button
               appearance="secondary"
@@ -441,15 +436,6 @@ const App: React.FC = () => {
               style={{ backgroundColor: "#5a9bd6ff" }}
             >
               STANDARD
-            </Button>
-            <Button
-              appearance="secondary"
-              onClick={handleParaphraseTextLudicrous}
-              disabled={status === "loading"}
-              className={styles.button}
-              style={{ backgroundColor: "#d67f2dff", color: "#fff" }}
-            >
-              FAST (LUDICROUS)
             </Button>
             {hostType === Office.HostType.PowerPoint && (
               <>
@@ -492,8 +478,7 @@ const App: React.FC = () => {
                   marginTop: "-8px",
                 }}
               >
-                PowerPoint tip: click in Speaker Notes and press Cmd/Ctrl+A, then click SIMPLE + SHORT, STANDARD, or
-                FAST (LUDICROUS).
+                PowerPoint tip: click in Speaker Notes and press Cmd/Ctrl+A, then click LUDICROUS or STANDARD.
                 <br />
                 One-click ALL SLIDES currently paraphrases slide text boxes in bulk.
               </Text>
