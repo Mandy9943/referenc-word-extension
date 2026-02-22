@@ -40,6 +40,14 @@ NS = {
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
     "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
 }
+XSI_TYPE_ATTR = "{http://www.w3.org/2001/XMLSchema-instance}type"
+METADATA_FIXED_TIMESTAMP = "2000-01-01T00:00:00Z"
+PPTX_METADATA_XML_PATHS = {
+    "docProps/core.xml",
+    "docProps/app.xml",
+    "docProps/custom.xml",
+    "ppt/commentAuthors.xml",
+}
 
 TRAILING_PUNCTUATION = r"[-:;,.!?-]*"
 NUMBERING_PREFIX = r"(?:(?:\d+(?:\.\d+)*|[IVX]+)\.?\s*)?"
@@ -151,6 +159,86 @@ class Step3Stats:
 
 def sanitize_text(text: str) -> str:
     return ZERO_WIDTH_RE.sub("", text or "").strip()
+
+
+def local_name(tag_name: str) -> str:
+    if "}" in tag_name:
+        return tag_name.rsplit("}", 1)[1]
+    return tag_name
+
+
+def scrub_pptx_metadata_xml(path_name: str, xml_bytes: bytes) -> bytes:
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return xml_bytes
+
+    changed = False
+
+    if path_name == "docProps/core.xml":
+        clear_fields = {
+            "creator",
+            "lastModifiedBy",
+            "keywords",
+            "description",
+            "subject",
+            "category",
+            "contentStatus",
+            "identifier",
+            "language",
+            "title",
+        }
+        for elem in root.iter():
+            name = local_name(elem.tag)
+            if name in clear_fields:
+                if elem.text:
+                    changed = True
+                elem.text = ""
+            elif name == "revision":
+                if (elem.text or "") != "1":
+                    changed = True
+                elem.text = "1"
+            elif name in {"created", "modified", "lastPrinted"}:
+                if (elem.text or "") != METADATA_FIXED_TIMESTAMP:
+                    changed = True
+                elem.text = METADATA_FIXED_TIMESTAMP
+                if name in {"created", "modified"}:
+                    if elem.get(XSI_TYPE_ATTR) != "dcterms:W3CDTF":
+                        changed = True
+                    elem.set(XSI_TYPE_ATTR, "dcterms:W3CDTF")
+
+    elif path_name == "docProps/app.xml":
+        for elem in root.iter():
+            name = local_name(elem.tag)
+            if name in {"Company", "Manager", "LastAuthor", "HyperlinkBase", "Template"}:
+                if elem.text:
+                    changed = True
+                elem.text = ""
+            elif name == "TotalTime":
+                if (elem.text or "") != "0":
+                    changed = True
+                elem.text = "0"
+
+    elif path_name == "docProps/custom.xml":
+        children = list(root)
+        if children:
+            changed = True
+            for child in children:
+                root.remove(child)
+
+    elif path_name == "ppt/commentAuthors.xml":
+        for elem in root.iter():
+            for attr_name, attr_value in list(elem.attrib.items()):
+                attr_local = local_name(attr_name)
+                if attr_local in {"name", "initials"}:
+                    if attr_value:
+                        changed = True
+                    elem.set(attr_name, "")
+
+    if not changed:
+        return xml_bytes
+
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
 def normalize_space(text: str) -> str:
@@ -1203,6 +1291,10 @@ def write_output_pptx(input_path: Path, output_path: Path, xml_docs: Dict[str, E
                 root = xml_docs[info.filename].getroot()
                 xml_bytes = ET.tostring(root, encoding="utf-8", xml_declaration=True)
                 out_zip.writestr(info, xml_bytes)
+            elif info.filename in PPTX_METADATA_XML_PATHS:
+                original_bytes = source_zip.read(info.filename)
+                scrubbed_bytes = scrub_pptx_metadata_xml(info.filename, original_bytes)
+                out_zip.writestr(info, scrubbed_bytes)
             else:
                 out_zip.writestr(info, source_zip.read(info.filename))
 

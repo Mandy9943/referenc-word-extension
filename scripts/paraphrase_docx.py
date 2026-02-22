@@ -36,6 +36,15 @@ NS = {
     "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
 }
 XML_SPACE_ATTR = "{http://www.w3.org/XML/1998/namespace}space"
+XSI_TYPE_ATTR = "{http://www.w3.org/2001/XMLSchema-instance}type"
+METADATA_FIXED_TIMESTAMP = "2000-01-01T00:00:00Z"
+DOCX_METADATA_XML_PATHS = {
+    "docProps/core.xml",
+    "docProps/app.xml",
+    "docProps/custom.xml",
+    "word/comments.xml",
+    "word/people.xml",
+}
 
 ZERO_WIDTH_RE = re.compile(r"[\u200B-\u200D\uFEFF]")
 XML_INVALID_CHAR_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
@@ -173,6 +182,103 @@ def sanitize_text(text: str) -> str:
 def sanitize_xml_text(text: str) -> str:
     # Word can report "unreadable content" when control chars leak into document.xml.
     return XML_INVALID_CHAR_RE.sub("", text or "")
+
+
+def local_name(tag_name: str) -> str:
+    if "}" in tag_name:
+        return tag_name.rsplit("}", 1)[1]
+    return tag_name
+
+
+def scrub_docx_metadata_xml(path_name: str, xml_bytes: bytes) -> bytes:
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return xml_bytes
+
+    changed = False
+
+    if path_name == "docProps/core.xml":
+        clear_fields = {
+            "creator",
+            "lastModifiedBy",
+            "keywords",
+            "description",
+            "subject",
+            "category",
+            "contentStatus",
+            "identifier",
+            "language",
+            "title",
+        }
+        for elem in root.iter():
+            name = local_name(elem.tag)
+            if name in clear_fields:
+                if elem.text:
+                    changed = True
+                elem.text = ""
+            elif name == "revision":
+                if (elem.text or "") != "1":
+                    changed = True
+                elem.text = "1"
+            elif name in {"created", "modified", "lastPrinted"}:
+                if (elem.text or "") != METADATA_FIXED_TIMESTAMP:
+                    changed = True
+                elem.text = METADATA_FIXED_TIMESTAMP
+                if name in {"created", "modified"}:
+                    if elem.get(XSI_TYPE_ATTR) != "dcterms:W3CDTF":
+                        changed = True
+                    elem.set(XSI_TYPE_ATTR, "dcterms:W3CDTF")
+
+    elif path_name == "docProps/app.xml":
+        for elem in root.iter():
+            name = local_name(elem.tag)
+            if name in {"Company", "Manager", "LastAuthor", "HyperlinkBase", "Template"}:
+                if elem.text:
+                    changed = True
+                elem.text = ""
+            elif name == "TotalTime":
+                if (elem.text or "") != "0":
+                    changed = True
+                elem.text = "0"
+
+    elif path_name == "docProps/custom.xml":
+        children = list(root)
+        if children:
+            changed = True
+            for child in children:
+                root.remove(child)
+
+    elif path_name == "word/comments.xml":
+        for elem in root.iter():
+            for attr_name, attr_value in list(elem.attrib.items()):
+                attr_local = local_name(attr_name)
+                if attr_local in {"author", "initials"}:
+                    if attr_value:
+                        changed = True
+                    elem.set(attr_name, "")
+                elif attr_local == "date":
+                    if attr_value != METADATA_FIXED_TIMESTAMP:
+                        changed = True
+                    elem.set(attr_name, METADATA_FIXED_TIMESTAMP)
+
+    elif path_name == "word/people.xml":
+        scrub_attrs = {"author", "name", "initials", "presenceInfo", "providerId", "userId"}
+        for elem in root.iter():
+            if elem.text and elem.text.strip():
+                changed = True
+                elem.text = ""
+            for attr_name, attr_value in list(elem.attrib.items()):
+                attr_local = local_name(attr_name)
+                if attr_local in scrub_attrs:
+                    if attr_value:
+                        changed = True
+                    elem.set(attr_name, "")
+
+    if not changed:
+        return xml_bytes
+
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
 def normalize_space(text: str) -> str:
@@ -647,17 +753,25 @@ def build_batch_payload_text(items: Sequence[ParaphraseItem]) -> str:
     return "\n\n".join(chunks)
 
 
-def split_into_account_chunks(items: Sequence[ParaphraseItem], account_count: int) -> List[Tuple[str, List[ParaphraseItem]]]:
+def split_into_account_chunks(
+    items: Sequence[ParaphraseItem],
+    selected_accounts: Sequence[str],
+) -> List[Tuple[str, List[ParaphraseItem]]]:
+    accounts = [key for key in selected_accounts if key in ACCOUNT_KEYS]
+    if not accounts:
+        accounts = [ACCOUNT_KEYS[0]]
+
+    account_count = len(accounts)
     chunk_size = math.ceil(len(items) / account_count)
     chunks: List[Tuple[str, List[ParaphraseItem]]] = []
-    for i in range(account_count):
+    for i, account_key in enumerate(accounts):
         start = i * chunk_size
         end = min(start + chunk_size, len(items))
         if start >= len(items):
             break
         section = list(items[start:end])
         if section:
-            chunks.append((ACCOUNT_KEYS[i], section))
+            chunks.append((account_key, section))
     return chunks
 
 
@@ -1072,17 +1186,21 @@ def run_step_2_paraphrase(
     cursor = 0
     total_words = sum(item.word_count for item in items)
     paragraph_by_index = {p.index: p for p in paragraphs}
-    scheduler_snapshot = fetch_health_snapshot(api_url, timeout_seconds)
+    scheduler_snapshot: Optional[Dict[str, Any]] = None
 
     while cursor < len(items):
         request_count += 1
+        latest_snapshot = fetch_health_snapshot(api_url, timeout_seconds)
+        if isinstance(latest_snapshot, dict):
+            scheduler_snapshot = latest_snapshot
+
         batch, cursor, batch_words = take_request_batch(items, cursor, max_items_per_request, max_words_per_request)
-        account_count, estimated_seconds, selected_accounts, effective_capacity = choose_account_plan(
+        _account_count, estimated_seconds, selected_accounts, effective_capacity = choose_account_plan(
             batch_words,
             mode,
             scheduler_snapshot,
         )
-        account_chunks = split_into_account_chunks(batch, account_count)
+        account_chunks = split_into_account_chunks(batch, selected_accounts)
 
         payload: Dict[str, str] = {"mode": mode}
         for account_key, account_items in account_chunks:
@@ -1330,6 +1448,10 @@ def write_output_docx(
                 xml_text = inject_missing_namespace_declarations(xml_text, namespace_declarations or {})
                 xml_bytes = xml_text.encode("utf-8")
                 out_zip.writestr(info, xml_bytes)
+            elif info.filename in DOCX_METADATA_XML_PATHS:
+                original_bytes = source_zip.read(info.filename)
+                scrubbed_bytes = scrub_docx_metadata_xml(info.filename, original_bytes)
+                out_zip.writestr(info, scrubbed_bytes)
             else:
                 out_zip.writestr(info, source_zip.read(info.filename))
 

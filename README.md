@@ -147,6 +147,7 @@ Input behavior:
 Output behavior:
 
 * Default output is `pr <input-name>.docx` in the same folder as the input file.
+* Output metadata is scrubbed (author / last modified by / custom props) for privacy.
 * If references cannot be detected or inserted, the script exits with a terminal error and does **not** write an output file.
 
 Useful options:
@@ -184,6 +185,7 @@ Input behavior:
 Output behavior:
 
 * Default output is `pr <input-name>.pptx` in the same folder as the input file.
+* Output metadata is scrubbed (author / last modified by / custom props) for privacy.
 * If references cannot be detected or inserted, the script exits with a terminal error and does **not** write an output file.
 
 Useful options:
