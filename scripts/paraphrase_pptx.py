@@ -11,17 +11,20 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import re
 import sys
+import time
+import traceback
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+from pipeline_observability import append_pipeline_log, local_now_pretty, utc_now_iso
 
 API_URL_DEFAULT = "https://analizeai.com/paraphrase-batch"
 PARAPHRASE_DELIMITER = "qbpdelim123"
@@ -29,6 +32,7 @@ ACCOUNT_KEYS = ("acc1", "acc2", "acc3")
 MODE_DEFAULT_BUDGET = {"dual": 520.0, "standard": 950.0, "ludicrous": 600.0}
 MODE_TARGET_SECONDS = {"dual": 18.0, "standard": 9.0, "ludicrous": 16.0}
 MODE_MIN_WORDS_PER_ACCOUNT = {"dual": 280.0, "standard": 500.0, "ludicrous": 300.0}
+MODE_MAX_WORDS_PER_ACCOUNT = {"dual": 760, "standard": 1400, "ludicrous": 900}
 MODE_COORDINATION_PENALTY_SECONDS = {"dual": 1.2, "standard": 0.7, "ludicrous": 1.0}
 MODE_RATE_SUFFIX = {"dual": "Dual", "standard": "Standard", "ludicrous": "Ludicrous"}
 
@@ -148,6 +152,9 @@ class Step2Stats:
     request_count: int
     total_words: int
     mode: str
+    request_summaries: List[Dict[str, Any]]
+    initial_chunk_failures: int
+    recovery_attempts: int
 
 
 @dataclass
@@ -806,17 +813,28 @@ def build_payload_text(items: Sequence[PptParagraph]) -> str:
     return "\n\n".join(chunks)
 
 
-def split_into_account_chunks(items: Sequence[PptParagraph], account_count: int) -> List[Tuple[str, List[PptParagraph]]]:
-    chunk_size = math.ceil(len(items) / account_count)
+def split_into_account_chunks(
+    items: Sequence[PptParagraph],
+    selected_accounts: Sequence[str],
+) -> List[Tuple[str, List[PptParagraph]]]:
+    accounts = [key for key in selected_accounts if key in ACCOUNT_KEYS]
+    if not accounts:
+        accounts = [ACCOUNT_KEYS[0]]
+
+    # Balance by words so one account does not get most of the heavy paragraphs.
+    buckets: Dict[str, List[PptParagraph]] = {account_key: [] for account_key in accounts}
+    bucket_words: Dict[str, int] = {account_key: 0 for account_key in accounts}
+
+    for item in items:
+        target = min(accounts, key=lambda key: (bucket_words[key], len(buckets[key])))
+        buckets[target].append(item)
+        bucket_words[target] += item.word_count
+
     chunks: List[Tuple[str, List[PptParagraph]]] = []
-    for i in range(account_count):
-        start = i * chunk_size
-        end = min(start + chunk_size, len(items))
-        if start >= len(items):
-            break
-        section = list(items[start:end])
+    for account_key in accounts:
+        section = buckets[account_key]
         if section:
-            chunks.append((ACCOUNT_KEYS[i], section))
+            chunks.append((account_key, section))
     return chunks
 
 
@@ -859,7 +877,9 @@ def post_batch_request(api_url: str, payload: Dict[str, str], timeout_seconds: i
         raise RuntimeError(f"Failed to reach batch API: {err}") from err
 
 
-def extract_account_output(response: Dict[str, object], account_key: str, mode: str, request_label: str) -> str:
+def extract_account_output(
+    response: Dict[str, object], account_key: str, mode: str, request_label: str
+) -> Tuple[str, Optional[str]]:
     account_result = response.get(account_key)
     if not isinstance(account_result, dict):
         raise RuntimeError(f"Missing response for account {account_key} in {request_label}")
@@ -873,7 +893,7 @@ def extract_account_output(response: Dict[str, object], account_key: str, mode: 
     if fallback_used:
         print(f"[{request_label}] warning: {account_key} used fallback {fallback_used}")
 
-    return str(paraphrased)
+    return str(paraphrased), (str(fallback_used) if fallback_used else None)
 
 
 def recovery_account_order(preferred_account_key: str) -> List[str]:
@@ -900,7 +920,8 @@ def request_chunk_output_with_fallback(
         try:
             payload = {"mode": mode, key: payload_text}
             response = post_batch_request(api_url, payload, timeout_seconds)
-            return extract_account_output(response, key, mode, request_label)
+            output, _fallback = extract_account_output(response, key, mode, request_label)
+            return output
         except Exception as error:  # pylint: disable=broad-except
             errors.append(f"{key}: {error}")
             print(f"[{request_label}] warning: recovery via {key} failed ({error})")
@@ -1143,18 +1164,63 @@ def run_step_2_paraphrase(
     request_count = 0
     updated_count = 0
     total_words = sum(item.word_count for item in eligible)
+    request_summaries: List[Dict[str, Any]] = []
+    initial_chunk_failures = 0
+    recovery_attempts = 0
     scheduler_snapshot = fetch_health_snapshot(api_url, timeout_seconds)
 
     while remaining:
         request_count += 1
         batch = take_request_batch(remaining, max_items_per_request, max_words_per_request)
         batch_word_count = sum(item.word_count for item in batch)
-        account_count, estimated_seconds, selected_accounts, effective_capacity = choose_account_plan(
+        _account_count, estimated_seconds, selected_accounts, effective_capacity = choose_account_plan(
             batch_word_count,
             mode,
             scheduler_snapshot,
         )
-        account_chunks = split_into_account_chunks(batch, account_count)
+        trimmed_for_single_account = False
+
+        # Guardrail: when only one account is currently usable, keep request size
+        # within per-account bounds to avoid long click/retry failure storms.
+        if len(selected_accounts) == 1 and len(batch) > 1:
+            max_single_account_words = MODE_MAX_WORDS_PER_ACCOUNT.get(mode, max_words_per_request)
+            if batch_word_count > max_single_account_words:
+                trimmed_for_single_account = True
+                original_count = len(batch)
+                while len(batch) > 1 and batch_word_count > max_single_account_words:
+                    moved = batch.pop()
+                    batch_word_count -= moved.word_count
+                    remaining.appendleft(moved)
+
+                _account_count, estimated_seconds, selected_accounts, effective_capacity = choose_account_plan(
+                    batch_word_count,
+                    mode,
+                    scheduler_snapshot,
+                )
+                print(
+                    f"[2/4] request {request_count}: single-account guard trimmed "
+                    f"{original_count}->{len(batch)} paragraphs ({batch_word_count} words)"
+                )
+
+        account_chunks = split_into_account_chunks(batch, selected_accounts)
+        active_accounts = [account_key for account_key, _ in account_chunks]
+        chunk_words_by_account = {
+            account_key: sum(item.word_count for item in account_items)
+            for account_key, account_items in account_chunks
+        }
+        request_summaries.append(
+            {
+                "request_index": request_count,
+                "paragraphs": len(batch),
+                "words": batch_word_count,
+                "account_count": len(account_chunks),
+                "accounts": active_accounts,
+                "effective_capacity": effective_capacity,
+                "estimated_seconds": estimated_seconds,
+                "trimmed_for_single_account": trimmed_for_single_account,
+                "chunk_words_by_account": chunk_words_by_account,
+            }
+        )
 
         payload: Dict[str, str] = {"mode": mode}
         for account_key, account_items in account_chunks:
@@ -1163,20 +1229,24 @@ def run_step_2_paraphrase(
         print(
             f"[2/4] request {request_count}: {len(batch)} paragraphs, "
             f"{batch_word_count} words, {len(account_chunks)} account(s)"
-            f" | est={estimated_seconds:.1f}s | accounts={'/'.join(selected_accounts)} | capacity={effective_capacity:.0f}"
+            f" | est={estimated_seconds:.1f}s | accounts={'/'.join(active_accounts)} | capacity={effective_capacity:.0f}"
         )
         response = post_batch_request(api_url, payload, timeout_seconds)
 
         for account_key, account_items in account_chunks:
             request_label = f"request {request_count} {account_key}"
             try:
-                paraphrased = extract_account_output(response, account_key, mode, f"request {request_count}")
+                paraphrased, _fallback_used = extract_account_output(
+                    response, account_key, mode, f"request {request_count}"
+                )
                 parts = parse_paraphrase_parts(paraphrased, len(account_items))
             except Exception as error:  # pylint: disable=broad-except
+                initial_chunk_failures += 1
                 print(f"[{request_label}] warning: initial chunk failed ({error}); retrying with recovery")
                 parts = []
 
             if len(parts) != len(account_items):
+                recovery_attempts += 1
                 parts = recover_account_chunk_parts(
                     account_key=account_key,
                     account_items=account_items,
@@ -1201,6 +1271,9 @@ def run_step_2_paraphrase(
         request_count=request_count,
         total_words=total_words,
         mode=mode,
+        request_summaries=request_summaries,
+        initial_chunk_failures=initial_chunk_failures,
+        recovery_attempts=recovery_attempts,
     )
 
 
@@ -1529,26 +1602,96 @@ def resolve_input_path(provided_input: Optional[Path]) -> Path:
 
 def main() -> int:
     args = parse_args()
+    run_started_perf = time.perf_counter()
+    run_started_local = local_now_pretty()
+    run_id = f"pptx-{int(time.time())}"
+    step_durations: Dict[str, float] = {}
+    step1_payload: Dict[str, Any] = {}
+    step2_payload: Dict[str, Any] = {}
+    step3_payload: Dict[str, Any] = {}
+    request_summaries: List[Dict[str, Any]] = []
+    input_path: Optional[Path] = None
+    output_path: Optional[Path] = None
+    mode = "dual"
+    error_step = ""
+    error_message = ""
+    error_traceback = ""
+    paragraph_count = 0
+    slide_count = 0
+    notes_count = 0
+    total_words = 0
+    reference_detection_mode = "missing"
+    reference_paragraph_count = 0
+
+    def finalize(status: str, exit_code: int) -> int:
+        total_duration = time.perf_counter() - run_started_perf
+        step2_total_words = 0
+        if isinstance(step2_payload, dict) and step2_payload:
+            step2_total_words = int(step2_payload.get("total_words", 0) or 0)
+            if not request_summaries and isinstance(step2_payload.get("request_summaries"), list):
+                request_summaries.extend(step2_payload.get("request_summaries", []))
+        append_pipeline_log(
+            {
+                "workflow": "pptx",
+                "run_id": run_id,
+                "status": status,
+                "mode": mode,
+                "started_at_local": run_started_local,
+                "started_at_utc": utc_now_iso(),
+                "dry_run": bool(args.dry_run),
+                "input_path": str(input_path) if input_path else "",
+                "output_path": str(output_path) if output_path else "",
+                "include_slides": not args.no_slides,
+                "include_notes": not args.no_notes,
+                "paragraph_count": paragraph_count,
+                "slide_paragraph_count": slide_count,
+                "notes_paragraph_count": notes_count,
+                "total_words_collected": total_words,
+                "reference_detection_mode": reference_detection_mode,
+                "reference_paragraph_count": reference_paragraph_count,
+                "total_duration_seconds": total_duration,
+                "step_durations": step_durations,
+                "step1_stats": step1_payload,
+                "step2_stats": step2_payload,
+                "step3_stats": step3_payload,
+                "step2_request_summaries": request_summaries,
+                "step2_total_words": step2_total_words,
+                "step2_initial_chunk_failures": int(step2_payload.get("initial_chunk_failures", 0) or 0),
+                "step2_recovery_attempts": int(step2_payload.get("recovery_attempts", 0) or 0),
+                "error_step": error_step,
+                "error_message": error_message,
+                "traceback": error_traceback,
+            }
+        )
+        return exit_code
 
     try:
         mode, provided_input = parse_mode_and_input(args.positional, args.mode)
         input_path = resolve_input_path(provided_input)
     except RuntimeError as error:
-        print(str(error), file=sys.stderr)
-        return 1
+        error_step = "bootstrap"
+        error_message = str(error)
+        print(error_message, file=sys.stderr)
+        return finalize("failed", 1)
 
     if not input_path.exists():
-        print(f"Input file does not exist: {input_path}", file=sys.stderr)
-        return 1
+        error_step = "bootstrap"
+        error_message = f"Input file does not exist: {input_path}"
+        print(error_message, file=sys.stderr)
+        return finalize("failed", 1)
     if input_path.suffix.lower() != ".pptx":
-        print(f"Input must be a .pptx file: {input_path}", file=sys.stderr)
-        return 1
+        error_step = "bootstrap"
+        error_message = f"Input must be a .pptx file: {input_path}"
+        print(error_message, file=sys.stderr)
+        return finalize("failed", 1)
 
     include_slides = not args.no_slides
     include_notes = not args.no_notes
     if not include_slides and not include_notes:
-        print("Nothing to do: both slides and notes are disabled.", file=sys.stderr)
-        return 1
+        error_step = "bootstrap"
+        error_message = "Nothing to do: both slides and notes are disabled."
+        print(error_message, file=sys.stderr)
+        return finalize("failed", 1)
 
     output_path = args.output if args.output else input_path.with_name(f"pr {input_path.name}")
 
@@ -1560,13 +1703,19 @@ def main() -> int:
                 include_notes=include_notes,
             )
     except Exception as error:  # pylint: disable=broad-except
-        print(f"Failed to read PPTX: {error}", file=sys.stderr)
-        return 1
+        error_step = "bootstrap"
+        error_message = f"Failed to read PPTX: {error}"
+        error_traceback = traceback.format_exc()
+        print(error_message, file=sys.stderr)
+        return finalize("failed", 1)
 
     if not paragraphs:
-        print("No eligible text containers found in the presentation XML.", file=sys.stderr)
-        return 1
+        error_step = "bootstrap"
+        error_message = "No eligible text containers found in the presentation XML."
+        print(error_message, file=sys.stderr)
+        return finalize("failed", 1)
 
+    paragraph_count = len(paragraphs)
     slide_count = sum(1 for paragraph in paragraphs if paragraph.kind == "slide")
     notes_count = sum(1 for paragraph in paragraphs if paragraph.kind == "notes")
     total_words = sum(paragraph.word_count for paragraph in paragraphs)
@@ -1577,12 +1726,15 @@ def main() -> int:
 
     initial_detection = detect_reference_section(paragraphs)
     reference_keys = initial_detection.reference_keys if initial_detection else set()
+    reference_paragraph_count = len(reference_keys)
     if initial_detection is None:
+        reference_detection_mode = "missing"
         print(
             "Reference detection (initial): missing. Step 3 will fail-safe if references cannot be detected.",
             file=sys.stderr,
         )
     else:
+        reference_detection_mode = initial_detection.mode
         print(
             f"Reference detection (initial): mode={initial_detection.mode}, "
             f"reference_paragraphs={len(initial_detection.reference_keys)}"
@@ -1590,7 +1742,10 @@ def main() -> int:
 
     print("[1/4] Clean (weird numbers + links + in-text citations, keep headings/subtitles) ...", flush=True)
     try:
+        step_started = time.perf_counter()
         step1 = run_step_1_clean(paragraphs, reference_keys)
+        step_durations["step1_clean"] = round(time.perf_counter() - step_started, 3)
+        step1_payload = asdict(step1)
         print(
             "[1/4] OK"
             f" | updated_paragraphs={step1.cleaned_paragraphs}"
@@ -1599,15 +1754,58 @@ def main() -> int:
             f", removed_weird_numbers={step1.removed_weird_numbers}"
         )
     except Exception as error:  # pylint: disable=broad-except
+        error_step = "step1_clean"
+        error_message = str(error)
+        error_traceback = traceback.format_exc()
         print(f"[1/4] FAILED: {error}", file=sys.stderr)
-        return 1
+        return finalize("failed", 1)
+
+    # Fail fast before expensive paraphrase if we cannot reliably add references later.
+    try:
+        refreshed_detection = detect_reference_section(paragraphs)
+        if refreshed_detection is None:
+            raise RuntimeError("Could not detect a reference section for citation insertion.")
+        preflight_references = extract_reference_entries(paragraphs, refreshed_detection.reference_keys)
+        if not preflight_references:
+            raise RuntimeError("Reference section found, but no usable references were parsed.")
+        reference_keys = refreshed_detection.reference_keys
+        reference_detection_mode = refreshed_detection.mode
+        reference_paragraph_count = len(reference_keys)
+        print(
+            "[preflight] Reference section ready"
+            f" | detection={reference_detection_mode}"
+            f", reference_paragraphs={reference_paragraph_count}"
+            f", parsed_references={len(preflight_references)}"
+        )
+    except Exception as error:  # pylint: disable=broad-except
+        error_step = "step3_precheck"
+        error_message = str(error)
+        error_traceback = traceback.format_exc()
+        print(
+            "[preflight] FAILED: "
+            f"{error}\n"
+            "No output file was written. Review references formatting before sending this presentation.",
+            file=sys.stderr,
+        )
+        return finalize("failed", 1)
 
     print(f"[2/4] Paraphrase ({'SIMPLE+SHORT' if mode == 'dual' else 'STANDARD'}) ...", flush=True)
     try:
+        step_started = time.perf_counter()
         if args.dry_run:
             eligible = build_step_2_eligible_paragraphs(paragraphs, mode, reference_keys)
             if not eligible:
                 raise RuntimeError("No eligible slide/notes paragraphs found for paraphrasing.")
+            step2_payload = {
+                "paraphrased_paragraphs": 0,
+                "request_count": 0,
+                "total_words": 0,
+                "mode": mode,
+                "request_summaries": [],
+                "initial_chunk_failures": 0,
+                "recovery_attempts": 0,
+                "dry_run_eligible_paragraphs": len(eligible),
+            }
             print(f"[2/4] DRY-RUN OK | eligible_paragraphs={len(eligible)}, mode={mode}")
         else:
             step2 = run_step_2_paraphrase(
@@ -1619,6 +1817,8 @@ def main() -> int:
                 max_items_per_request=args.max_items_per_request,
                 max_words_per_request=args.max_words_per_request,
             )
+            step2_payload = asdict(step2)
+            request_summaries = step2.request_summaries
             print(
                 "[2/4] OK"
                 f" | paraphrased_paragraphs={step2.paraphrased_paragraphs}"
@@ -1626,12 +1826,17 @@ def main() -> int:
                 f", words={step2.total_words}"
                 f", mode={step2.mode}"
             )
+        step_durations["step2_paraphrase"] = round(time.perf_counter() - step_started, 3)
     except Exception as error:  # pylint: disable=broad-except
+        error_step = "step2_paraphrase"
+        error_message = str(error)
+        error_traceback = traceback.format_exc()
         print(f"[2/4] FAILED: {error}", file=sys.stderr)
-        return 1
+        return finalize("failed", 1)
 
     print("[3/4] Add new in-text references (slides + speaker notes) ...", flush=True)
     try:
+        step_started = time.perf_counter()
         if args.dry_run:
             detection = detect_reference_section(paragraphs)
             if detection is None:
@@ -1642,6 +1847,14 @@ def main() -> int:
             candidates = build_step_3_eligible_paragraphs(paragraphs, detection.reference_keys)
             if not candidates:
                 raise RuntimeError("No eligible slide/notes paragraphs found for inserting references.")
+            step3_payload = {
+                "detection_mode": detection.mode,
+                "reference_count": len(references),
+                "inserted_citations": 0,
+                "inserted_slide_paragraphs": 0,
+                "inserted_notes_paragraphs": 0,
+                "dry_run_eligible_targets": len(candidates),
+            }
             print(
                 "[3/4] DRY-RUN OK"
                 f" | detection={detection.mode}"
@@ -1650,6 +1863,7 @@ def main() -> int:
             )
         else:
             step3 = run_step_3_add_references(paragraphs)
+            step3_payload = asdict(step3)
             print(
                 "[3/4] OK"
                 f" | detection={step3.detection_mode}"
@@ -1658,31 +1872,40 @@ def main() -> int:
                 f", inserted_slide={step3.inserted_slide_paragraphs}"
                 f", inserted_notes={step3.inserted_notes_paragraphs}"
             )
+        step_durations["step3_references"] = round(time.perf_counter() - step_started, 3)
     except Exception as error:  # pylint: disable=broad-except
+        error_step = "step3_references"
+        error_message = str(error)
+        error_traceback = traceback.format_exc()
         print(
             "[3/4] FAILED: "
             f"{error}\n"
             "No output file was written. Review references formatting before sending this presentation.",
             file=sys.stderr,
         )
-        return 1
+        return finalize("failed", 1)
 
     print("[4/4] Write output PPTX ...", flush=True)
     try:
+        step_started = time.perf_counter()
         if args.dry_run:
             print("[4/4] DRY-RUN OK | no file written")
         else:
             write_output_pptx(input_path, output_path, xml_docs)
             print(f"[4/4] OK | output={output_path}")
+        step_durations["step4_write_output"] = round(time.perf_counter() - step_started, 3)
     except Exception as error:  # pylint: disable=broad-except
+        error_step = "step4_write_output"
+        error_message = str(error)
+        error_traceback = traceback.format_exc()
         print(f"[4/4] FAILED: {error}", file=sys.stderr)
-        return 1
+        return finalize("failed", 1)
 
     if args.dry_run:
         print("Pipeline dry-run completed successfully.")
     else:
         print("Pipeline completed successfully.")
-    return 0
+    return finalize("success", 0)
 
 
 if __name__ == "__main__":
