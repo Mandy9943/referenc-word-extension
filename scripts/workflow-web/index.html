@@ -54,6 +54,39 @@
         border: 1px solid var(--border);
         padding: 10px 12px;
       }
+      .workflow-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .workflow-card {
+        text-align: left;
+        background: #f9fcff;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 12px;
+        cursor: pointer;
+      }
+      .workflow-card:hover {
+        border-color: #8ab6ea;
+        background: #f2f8ff;
+      }
+      .workflow-card.active {
+        border-color: var(--accent);
+        background: #eaf3ff;
+        box-shadow: inset 0 0 0 1px rgba(47, 126, 216, 0.2);
+      }
+      .workflow-title {
+        font-weight: 700;
+        font-size: 14px;
+        color: var(--ink);
+      }
+      .workflow-desc {
+        margin-top: 6px;
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.35;
+      }
       button {
         background: var(--accent);
         color: #fff;
@@ -124,24 +157,20 @@
           margin: 12px;
           padding: 16px;
         }
+        .workflow-grid {
+          grid-template-columns: 1fr;
+        }
       }
     </style>
   </head>
   <body>
     <main class="container">
       <h1>Document Workflow Runner</h1>
-      <p>Drag and drop your file(s), select workflow, then download the processed output.</p>
+      <p>Drag and drop your file(s), choose a workflow block, then download the processed output.</p>
 
       <div class="row">
-        <label for="workflow">Workflow</label>
-        <select id="workflow">
-          <option value="ppt-to-doc">ppt to doc</option>
-          <option value="ppt-to-doc-batch">ppt to doc --batch</option>
-          <option value="doc-dual">npm run doc (SIMPLE+SHORT)</option>
-          <option value="doc-standard">npm run doc:standard</option>
-          <option value="ppt-dual">npm run ppt (SIMPLE+SHORT)</option>
-          <option value="ppt-standard">npm run ppt:standard</option>
-        </select>
+        <label>Workflow</label>
+        <div id="workflow-cards" class="workflow-grid" role="radiogroup" aria-label="Workflow selection"></div>
         <div id="workflow-meta" class="meta"></div>
       </div>
 
@@ -161,16 +190,57 @@
     </main>
 
     <script>
-      const config = {
-        "ppt-to-doc": { exts: [".pptx"], multiple: false },
-        "ppt-to-doc-batch": { exts: [".pptx"], multiple: true },
-        "doc-dual": { exts: [".docx"], multiple: true },
-        "doc-standard": { exts: [".docx"], multiple: true },
-        "ppt-dual": { exts: [".pptx"], multiple: true },
-        "ppt-standard": { exts: [".pptx"], multiple: true },
-      };
+      const workflowDefinitions = [
+        {
+          key: "doc-dual",
+          title: "DOCX — SIMPLE+SHORT",
+          description: "Cleans text artifacts, paraphrases in SIMPLE+SHORT, then inserts refreshed in-text references.",
+          exts: [".docx"],
+          multiple: true,
+        },
+        {
+          key: "doc-standard",
+          title: "DOCX — STANDARD",
+          description: "Cleans text artifacts, paraphrases in STANDARD mode, then inserts refreshed in-text references.",
+          exts: [".docx"],
+          multiple: true,
+        },
+        {
+          key: "ppt-dual",
+          title: "PPTX — SIMPLE+SHORT",
+          description: "Cleans slide and speaker-note text, paraphrases in SIMPLE+SHORT, then applies refreshed in-text references.",
+          exts: [".pptx"],
+          multiple: true,
+        },
+        {
+          key: "ppt-standard",
+          title: "PPTX — STANDARD",
+          description: "Cleans slide and speaker-note text, paraphrases in STANDARD mode, then applies refreshed in-text references.",
+          exts: [".pptx"],
+          multiple: true,
+        },
+        {
+          key: "ppt-to-doc",
+          title: "PPTX to DOCX — Single file",
+          description: "Converts one presentation into a DOCX that includes slide content and speaker notes.",
+          exts: [".pptx"],
+          multiple: false,
+        },
+        {
+          key: "ppt-to-doc-batch",
+          title: "PPTX to DOCX — Batch",
+          description: "Converts multiple presentations to DOCX files in one run and downloads a single ZIP package.",
+          exts: [".pptx"],
+          multiple: true,
+        },
+      ];
 
-      const workflowEl = document.getElementById("workflow");
+      const config = workflowDefinitions.reduce((acc, item) => {
+        acc[item.key] = { exts: item.exts, multiple: item.multiple };
+        return acc;
+      }, {});
+
+      const workflowCardsEl = document.getElementById("workflow-cards");
       const filesEl = document.getElementById("files");
       const dropEl = document.getElementById("drop");
       const listEl = document.getElementById("file-list");
@@ -178,6 +248,7 @@
       const statusEl = document.getElementById("status");
       const metaEl = document.getElementById("workflow-meta");
 
+      let selectedWorkflow = workflowDefinitions[0].key;
       let selectedFiles = [];
 
       function status(text, kind = "") {
@@ -185,11 +256,40 @@
         statusEl.className = `status ${kind}`.trim();
       }
 
+      function getCurrentConfig() {
+        return config[selectedWorkflow];
+      }
+
       function updateMeta() {
-        const c = config[workflowEl.value];
+        const c = getCurrentConfig();
         metaEl.textContent = `Accepted: ${c.exts.join(", ")} | ${c.multiple ? "Multiple files allowed" : "Single file only"}`;
         filesEl.accept = c.exts.join(",");
         filesEl.multiple = c.multiple;
+      }
+
+      function renderWorkflowCards() {
+        workflowCardsEl.innerHTML = "";
+        workflowDefinitions.forEach((item) => {
+          const card = document.createElement("button");
+          card.type = "button";
+          card.className = `workflow-card${item.key === selectedWorkflow ? " active" : ""}`;
+          card.setAttribute("role", "radio");
+          card.setAttribute("aria-checked", item.key === selectedWorkflow ? "true" : "false");
+          card.dataset.workflow = item.key;
+          card.innerHTML = `
+            <div class="workflow-title">${item.title}</div>
+            <div class="workflow-desc">${item.description}</div>
+          `;
+          card.addEventListener("click", () => {
+            selectedWorkflow = item.key;
+            renderWorkflowCards();
+            updateMeta();
+            if (selectedFiles.length) {
+              setFiles(selectedFiles);
+            }
+          });
+          workflowCardsEl.appendChild(card);
+        });
       }
 
       function ext(name) {
@@ -212,7 +312,7 @@
       }
 
       function setFiles(files) {
-        const c = config[workflowEl.value];
+        const c = getCurrentConfig();
         const arr = Array.from(files || []);
 
         if (!c.multiple && arr.length > 1) {
@@ -244,14 +344,14 @@
           return;
         }
 
-        const c = config[workflowEl.value];
+        const c = getCurrentConfig();
         if (!c.multiple && selectedFiles.length !== 1) {
           status("This workflow needs exactly one file.", "error");
           return;
         }
 
         const form = new FormData();
-        form.append("workflow", workflowEl.value);
+        form.append("workflow", selectedWorkflow);
         selectedFiles.forEach((file) => form.append("files", file, file.name));
 
         runEl.disabled = true;
@@ -294,13 +394,6 @@
         }
       }
 
-      workflowEl.addEventListener("change", () => {
-        updateMeta();
-        if (selectedFiles.length) {
-          setFiles(selectedFiles);
-        }
-      });
-
       filesEl.addEventListener("change", (event) => setFiles(event.target.files));
       dropEl.addEventListener("click", () => filesEl.click());
 
@@ -326,6 +419,7 @@
       });
 
       runEl.addEventListener("click", runWorkflow);
+      renderWorkflowCards();
       updateMeta();
       renderFiles();
     </script>

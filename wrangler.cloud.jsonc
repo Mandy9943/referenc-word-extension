@@ -25,6 +25,6 @@
     }
   ],
   "vars": {
-    "WORKFLOW_CONTAINER_NAME": "workflow-web-singleton"
+    "WORKFLOW_CONTAINER_NAME": "workflow-web-singleton-v2"
   }
 }
