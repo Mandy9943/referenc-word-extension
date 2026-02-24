@@ -72,4 +72,26 @@ describe("Word", function () {
 
     assert.strictEqual(index, -1);
   });
+
+  it("Infers headerless reference block from tail reference-like entries", function () {
+    const index = findReferenceStartIndexFromTexts([
+      "Introduction paragraph with context and motivation for the topic.",
+      "Body analysis continues with findings and interpretation.",
+      "Arab News (2025) Saudi Arabia market update. Available at: https://example.com/arab-news",
+      "CNBC (2025) Industry outlook and growth indicators. Available at: https://example.com/cnbc-outlook",
+    ]);
+
+    assert.strictEqual(index, 2);
+  });
+
+  it("Does not infer references from normal narrative tail text", function () {
+    const index = findReferenceStartIndexFromTexts([
+      "Tourism trends are evolving rapidly across digital channels in 2025.",
+      "This paragraph explains behavior shifts and campaign tactics in practical terms.",
+      "Results indicate that visual storytelling improves conversion in multiple segments.",
+      "Recommendations focus on execution quality and continuous optimization.",
+    ]);
+
+    assert.strictEqual(index, -1);
+  });
 });

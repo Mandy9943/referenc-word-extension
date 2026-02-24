@@ -94,6 +94,7 @@ REFERENCE_CUE_RE = re.compile(
     re.IGNORECASE,
 )
 AUTHOR_RE = re.compile(r"(?:^|[\s;])(?:[A-Z][a-z]+,\s*(?:[A-Z]\.|[A-Z][a-z]+))")
+ORG_AUTHOR_RE = re.compile(r"^\s*[A-Z][A-Za-z0-9&'’.\- ]{2,80}\s*\((?:19|20)\d{2}[a-z]?\)")
 LIST_PREFIX_RE = re.compile(r"^\s*(?:\[\d{1,3}\]|\d{1,3}[.)\]]|[-•])\s+")
 
 TOC_HEADER_PATTERNS = [
@@ -438,11 +439,12 @@ def is_reference_like_line(raw_line: str) -> bool:
     has_url_or_doi = bool(URL_OR_DOI_RE.search(line))
     has_cue = bool(REFERENCE_CUE_RE.search(line))
     has_author = bool(AUTHOR_RE.search(line))
+    has_org_author = bool(ORG_AUTHOR_RE.search(line))
     has_list_prefix = bool(LIST_PREFIX_RE.search(line))
 
     if has_url_or_doi and (has_year or has_author or has_list_prefix):
         return True
-    if has_year and (has_author or has_cue or has_list_prefix):
+    if has_year and (has_author or has_org_author or has_cue or has_list_prefix):
         return True
     return False
 
@@ -472,12 +474,12 @@ def infer_reference_start_index(paragraphs: Sequence[Paragraph]) -> int:
     scores = [count_reference_like_lines(p.text) for p in paragraphs]
 
     # Single dense paragraph with many references (common when references are pasted as one block).
-    dense_candidates = [i for i in range(tail_start, n) if scores[i] >= 4]
+    dense_candidates = [i for i in range(tail_start, n) if scores[i] >= 3]
     if dense_candidates:
         return dense_candidates[0]
 
     scored_indices = [i for i in range(tail_start, n) if scores[i] >= 1]
-    if len(scored_indices) < 3:
+    if len(scored_indices) < 2:
         return -1
 
     clusters: List[List[int]] = []
@@ -503,7 +505,7 @@ def infer_reference_start_index(paragraphs: Sequence[Paragraph]) -> int:
     if not best_cluster:
         return -1
 
-    if best_score >= 4 or len(best_cluster) >= 3:
+    if best_score >= 3 or len(best_cluster) >= 2:
         return best_cluster[0]
 
     return -1

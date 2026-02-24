@@ -169,6 +169,13 @@ const TOC_HEADERS = [
   new RegExp(`^\\s*${NUMBERING_PREFIX}toc\\s*${TRAILING_PUNCTUATION}\\s*$`, "i"),
 ];
 
+const YEAR_RE = /\b(?:19|20)\d{2}[a-z]?\b/i;
+const URL_OR_DOI_RE = /\b(?:https?:\/\/|www\.|doi:\s*|10\.\d{4,9}\/)\S+/i;
+const REFERENCE_CUE_RE = /\b(?:available at|retrieved from|accessed|doi|journal|vol\.?|no\.?|pp\.?|edition|ed\.)\b/i;
+const AUTHOR_RE = /(?:^|[\s;])(?:[A-Z][a-z]+,\s*(?:[A-Z]\.|[A-Z][a-z]+))/;
+const ORG_AUTHOR_RE = /^\s*[A-Z][A-Za-z0-9&'’.\- ]{2,80}\s*\((?:19|20)\d{2}[a-z]?\)/;
+const LIST_PREFIX_RE = /^\s*(?:\[\d{1,3}\]|\d{1,3}[.)\]]|[-•])\s+/;
+
 type ParagraphMeta = {
   index: number;
   text: string;
@@ -326,11 +333,93 @@ export function findReferenceStartIndexFromTexts(paragraphTexts: string[]): numb
     }
   }
 
-  return -1;
+  return inferReferenceStartIndexFromTexts(paragraphTexts);
 }
 
 function findReferenceStartIndex(metas: ParagraphMeta[]): number {
   return findReferenceStartIndexFromTexts(metas.map((meta) => meta.text));
+}
+
+function normalizeSpace(text: string): string {
+  return (text || "").replace(/\s{2,}/g, " ").trim();
+}
+
+function splitReferenceCandidateLines(text: string): string[] {
+  const prepared = (text || "")
+    .replace(/\r/g, "\n")
+    .replace(/(?<!\d)(\d{1,3}[.)]\s*)/g, "\n$1");
+  const lines = prepared
+    .split(/\n+/)
+    .map((line) => normalizeSpace(line))
+    .filter(Boolean);
+  return lines.length > 0 ? lines : normalizeSpace(text) ? [normalizeSpace(text)] : [];
+}
+
+function isReferenceLikeLine(rawLine: string): boolean {
+  const line = normalizeSpace(rawLine);
+  if (!line) return false;
+  if (line.split(/\s+/).filter(Boolean).length < 4) return false;
+
+  const hasYear = YEAR_RE.test(line);
+  const hasUrlOrDoi = URL_OR_DOI_RE.test(line);
+  const hasCue = REFERENCE_CUE_RE.test(line);
+  const hasAuthor = AUTHOR_RE.test(line);
+  const hasOrgAuthor = ORG_AUTHOR_RE.test(line);
+  const hasListPrefix = LIST_PREFIX_RE.test(line);
+
+  if (hasUrlOrDoi && (hasYear || hasAuthor || hasListPrefix)) return true;
+  if (hasYear && (hasAuthor || hasOrgAuthor || hasCue || hasListPrefix)) return true;
+  return false;
+}
+
+function countReferenceLikeLines(text: string): number {
+  return splitReferenceCandidateLines(text).filter((line) => isReferenceLikeLine(line)).length;
+}
+
+function inferReferenceStartIndexFromTexts(paragraphTexts: string[]): number {
+  if (!paragraphTexts || paragraphTexts.length === 0) return -1;
+
+  const total = paragraphTexts.length;
+  const tailStart = Math.max(0, Math.floor(total * 0.45));
+  const scores = paragraphTexts.map((text) => countReferenceLikeLines(text || ""));
+
+  const denseCandidate = scores.findIndex((score, idx) => idx >= tailStart && score >= 3);
+  if (denseCandidate !== -1) return denseCandidate;
+
+  const scoredIndices: number[] = [];
+  for (let i = tailStart; i < total; i++) {
+    if (scores[i] >= 1) scoredIndices.push(i);
+  }
+  if (scoredIndices.length < 2) return -1;
+
+  const clusters: number[][] = [];
+  let cluster: number[] = [scoredIndices[0]];
+  for (let i = 1; i < scoredIndices.length; i++) {
+    const idx = scoredIndices[i];
+    if (idx - cluster[cluster.length - 1] <= 2) {
+      cluster.push(idx);
+    } else {
+      clusters.push(cluster);
+      cluster = [idx];
+    }
+  }
+  clusters.push(cluster);
+
+  let bestCluster: number[] | null = null;
+  let bestScore = -1;
+  for (const c of clusters) {
+    const score = c.reduce((sum, idx) => sum + scores[idx], 0);
+    if (score > bestScore) {
+      bestScore = score;
+      bestCluster = c;
+    } else if (score === bestScore && bestCluster && c[c.length - 1] > bestCluster[bestCluster.length - 1]) {
+      bestCluster = c;
+    }
+  }
+
+  if (!bestCluster) return -1;
+  if (bestScore >= 3 || bestCluster.length >= 2) return bestCluster[0];
+  return -1;
 }
 
 function isInReferenceSection(paragraphIndex: number, referenceStartIndex: number): boolean {
