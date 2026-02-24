@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Document Workflow Runner</title>
+    <style>
+      :root {
+        --bg: #f4f7fb;
+        --panel: #ffffff;
+        --ink: #1f2d3d;
+        --muted: #5d6b7a;
+        --accent: #2f7ed8;
+        --ok: #1f9d55;
+        --error: #d64545;
+        --border: #d9e1ea;
+      }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+        color: var(--ink);
+        background: radial-gradient(circle at 10% 10%, #ebf3ff 0%, var(--bg) 40%);
+      }
+      .container {
+        max-width: 860px;
+        margin: 40px auto;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 24px;
+        box-shadow: 0 16px 48px rgba(27, 39, 51, 0.08);
+      }
+      h1 {
+        margin: 0 0 10px;
+        font-size: 24px;
+      }
+      p {
+        margin: 6px 0;
+        color: var(--muted);
+      }
+      .row {
+        display: grid;
+        gap: 14px;
+        margin-top: 18px;
+      }
+      label {
+        font-weight: 600;
+        font-size: 14px;
+      }
+      select,
+      button {
+        font-size: 15px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        padding: 10px 12px;
+      }
+      button {
+        background: var(--accent);
+        color: #fff;
+        border-color: var(--accent);
+        font-weight: 700;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: wait;
+      }
+      .drop {
+        border: 2px dashed #aac5e4;
+        border-radius: 12px;
+        padding: 22px;
+        text-align: center;
+        transition: all 0.2s ease;
+        background: #f8fbff;
+      }
+      .drop.dragover {
+        border-color: var(--accent);
+        background: #edf5ff;
+      }
+      .file-list {
+        margin-top: 10px;
+        max-height: 160px;
+        overflow: auto;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px;
+        background: #fbfdff;
+      }
+      .file-item {
+        font-size: 13px;
+        margin: 3px 0;
+      }
+      .status {
+        margin-top: 16px;
+        border-radius: 10px;
+        padding: 12px;
+        font-size: 14px;
+        border: 1px solid var(--border);
+        background: #f8fafc;
+        color: var(--ink);
+        white-space: pre-wrap;
+      }
+      .status.ok {
+        border-color: #b9e8cb;
+        background: #f0fff5;
+        color: var(--ok);
+      }
+      .status.error {
+        border-color: #f2c2c2;
+        background: #fff5f5;
+        color: var(--error);
+      }
+      .meta {
+        margin-top: 8px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .hint {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      @media (max-width: 640px) {
+        .container {
+          margin: 12px;
+          padding: 16px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="container">
+      <h1>Document Workflow Runner</h1>
+      <p>Drag and drop your file(s), select workflow, then download the processed output.</p>
+
+      <div class="row">
+        <label for="workflow">Workflow</label>
+        <select id="workflow">
+          <option value="ppt-to-doc">ppt to doc</option>
+          <option value="ppt-to-doc-batch">ppt to doc --batch</option>
+          <option value="doc-dual">npm run doc (SIMPLE+SHORT)</option>
+          <option value="doc-standard">npm run doc:standard</option>
+          <option value="ppt-dual">npm run ppt (SIMPLE+SHORT)</option>
+          <option value="ppt-standard">npm run ppt:standard</option>
+        </select>
+        <div id="workflow-meta" class="meta"></div>
+      </div>
+
+      <div id="drop" class="drop row">
+        <strong>Drop files here</strong>
+        <span class="hint">or click to browse</span>
+        <input id="files" type="file" multiple style="display:none" />
+      </div>
+
+      <div class="file-list" id="file-list">No files selected.</div>
+
+      <div class="row">
+        <button id="run">Process & Download</button>
+      </div>
+
+      <div id="status" class="status">Ready.</div>
+    </main>
+
+    <script>
+      const config = {
+        "ppt-to-doc": { exts: [".pptx"], multiple: false },
+        "ppt-to-doc-batch": { exts: [".pptx"], multiple: true },
+        "doc-dual": { exts: [".docx"], multiple: true },
+        "doc-standard": { exts: [".docx"], multiple: true },
+        "ppt-dual": { exts: [".pptx"], multiple: true },
+        "ppt-standard": { exts: [".pptx"], multiple: true },
+      };
+
+      const workflowEl = document.getElementById("workflow");
+      const filesEl = document.getElementById("files");
+      const dropEl = document.getElementById("drop");
+      const listEl = document.getElementById("file-list");
+      const runEl = document.getElementById("run");
+      const statusEl = document.getElementById("status");
+      const metaEl = document.getElementById("workflow-meta");
+
+      let selectedFiles = [];
+
+      function status(text, kind = "") {
+        statusEl.textContent = text;
+        statusEl.className = `status ${kind}`.trim();
+      }
+
+      function updateMeta() {
+        const c = config[workflowEl.value];
+        metaEl.textContent = `Accepted: ${c.exts.join(", ")} | ${c.multiple ? "Multiple files allowed" : "Single file only"}`;
+        filesEl.accept = c.exts.join(",");
+        filesEl.multiple = c.multiple;
+      }
+
+      function ext(name) {
+        const i = name.lastIndexOf(".");
+        return i === -1 ? "" : name.slice(i).toLowerCase();
+      }
+
+      function renderFiles() {
+        if (!selectedFiles.length) {
+          listEl.textContent = "No files selected.";
+          return;
+        }
+        listEl.innerHTML = "";
+        selectedFiles.forEach((file) => {
+          const div = document.createElement("div");
+          div.className = "file-item";
+          div.textContent = `${file.name} (${Math.round(file.size / 1024)} KB)`;
+          listEl.appendChild(div);
+        });
+      }
+
+      function setFiles(files) {
+        const c = config[workflowEl.value];
+        const arr = Array.from(files || []);
+
+        if (!c.multiple && arr.length > 1) {
+          status("This workflow accepts only one file.", "error");
+          return;
+        }
+
+        const bad = arr.find((file) => !c.exts.includes(ext(file.name)));
+        if (bad) {
+          status(`Invalid file type: ${bad.name}. Allowed: ${c.exts.join(", ")}`, "error");
+          return;
+        }
+
+        selectedFiles = arr;
+        renderFiles();
+        status(`Selected ${selectedFiles.length} file(s).`);
+      }
+
+      function parseFileNameFromDisposition(header) {
+        if (!header) return "processed-file";
+        const match = /filename\*?=(?:UTF-8''|\")?([^\";]+)/i.exec(header);
+        if (!match) return "processed-file";
+        return decodeURIComponent(match[1].replace(/\"/g, "").trim());
+      }
+
+      async function runWorkflow() {
+        if (!selectedFiles.length) {
+          status("Select at least one file.", "error");
+          return;
+        }
+
+        const c = config[workflowEl.value];
+        if (!c.multiple && selectedFiles.length !== 1) {
+          status("This workflow needs exactly one file.", "error");
+          return;
+        }
+
+        const form = new FormData();
+        form.append("workflow", workflowEl.value);
+        selectedFiles.forEach((file) => form.append("files", file, file.name));
+
+        runEl.disabled = true;
+        status("Processing... this can take a while for big files.");
+
+        try {
+          const response = await fetch("/api/process", {
+            method: "POST",
+            body: form,
+          });
+
+          if (!response.ok) {
+            let payload;
+            try {
+              payload = await response.json();
+            } catch {
+              payload = { error: `HTTP ${response.status}` };
+            }
+            const details = payload.details ? `\n\n${payload.details}` : "";
+            throw new Error(`${payload.error || "Processing failed."}${details}`);
+          }
+
+          const blob = await response.blob();
+          const filename = parseFileNameFromDisposition(response.headers.get("content-disposition"));
+
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+
+          status(`Done. Download started: ${filename}`, "ok");
+        } catch (error) {
+          status(error.message || String(error), "error");
+        } finally {
+          runEl.disabled = false;
+        }
+      }
+
+      workflowEl.addEventListener("change", () => {
+        updateMeta();
+        if (selectedFiles.length) {
+          setFiles(selectedFiles);
+        }
+      });
+
+      filesEl.addEventListener("change", (event) => setFiles(event.target.files));
+      dropEl.addEventListener("click", () => filesEl.click());
+
+      ["dragenter", "dragover"].forEach((eventName) => {
+        dropEl.addEventListener(eventName, (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          dropEl.classList.add("dragover");
+        });
+      });
+
+      ["dragleave", "drop"].forEach((eventName) => {
+        dropEl.addEventListener(eventName, (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          dropEl.classList.remove("dragover");
+        });
+      });
+
+      dropEl.addEventListener("drop", (event) => {
+        if (!event.dataTransfer || !event.dataTransfer.files) return;
+        setFiles(event.dataTransfer.files);
+      });
+
+      runEl.addEventListener("click", runWorkflow);
+      updateMeta();
+      renderFiles();
+    </script>
+  </body>
+</html>

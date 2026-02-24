@@ -197,6 +197,39 @@ python3 scripts/paraphrase_pptx.py --mode dual "/path/in.pptx" --dry-run
 python3 scripts/paraphrase_pptx.py --no-notes "/path/in.pptx"
 ```
 
+## Drag-and-drop web app (for non-technical users)
+
+You can run a local web app so users only drag/drop files and download outputs.
+
+Start:
+
+```bash
+npm run web:workflows
+```
+
+Open in browser:
+
+```text
+http://localhost:4312
+```
+
+Available workflows in the UI:
+
+* `ppt to doc`
+* `ppt to doc --batch`
+* `npm run doc (SIMPLE+SHORT)`
+* `npm run doc:standard`
+* `npm run ppt (SIMPLE+SHORT)`
+* `npm run ppt:standard`
+
+Notes:
+
+* DOC workflows accept `.docx`.
+* PPT workflows and PPT->DOC workflows accept `.pptx`.
+* Single-output runs download the processed file directly.
+* Multi-file runs return `processed-files.zip`.
+* The web app reuses the same underlying scripts and command logic as terminal workflows.
+
 ## Testing & quality
 
 | Command | Purpose |
