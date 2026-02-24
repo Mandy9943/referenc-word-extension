@@ -26,6 +26,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 API_URL_DEFAULT = "https://analizeai.com/paraphrase-batch"
 PARAPHRASE_DELIMITER = "qbpdelim123"
+PARAPHRASE_DELIMITER_RE = re.compile(re.escape(PARAPHRASE_DELIMITER), re.IGNORECASE)
 ACCOUNT_KEYS = ("acc1", "acc2", "acc3")
 MODE_DEFAULT_BUDGET = {"dual": 520.0, "standard": 950.0, "ludicrous": 600.0}
 MODE_TARGET_SECONDS = {"dual": 18.0, "standard": 9.0, "ludicrous": 16.0}
@@ -170,6 +171,15 @@ class Step3Stats:
 
 def sanitize_text(text: str) -> str:
     return ZERO_WIDTH_RE.sub("", text or "").strip()
+
+
+def strip_paraphrase_delimiter_token(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = PARAPHRASE_DELIMITER_RE.sub(" ", text)
+    cleaned = re.sub(r"\s+([,.;:!?])", r"\1", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return cleaned.strip()
 
 
 def sanitize_xml_text(text: str) -> str:
@@ -896,15 +906,24 @@ def choose_account_plan(total_words: int, mode: str, snapshot: Optional[Dict[str
 
 
 def parse_paraphrase_parts(text: str, expected_count: int) -> List[str]:
-    parts = [p.strip() for p in re.split(re.escape(PARAPHRASE_DELIMITER), text, flags=re.IGNORECASE) if p.strip()]
+    parts: List[str] = []
+    for raw_part in re.split(re.escape(PARAPHRASE_DELIMITER), text, flags=re.IGNORECASE):
+        cleaned_part = strip_paraphrase_delimiter_token(raw_part.strip())
+        if cleaned_part:
+            parts.append(cleaned_part)
 
     if len(parts) < expected_count:
         recovered: List[str] = []
         for part in parts:
             if "\n\n" in part:
-                recovered.extend([p.strip() for p in re.split(r"\n\n+", part) if p.strip()])
+                for raw_subpart in re.split(r"\n\n+", part):
+                    cleaned_subpart = strip_paraphrase_delimiter_token(raw_subpart.strip())
+                    if cleaned_subpart:
+                        recovered.append(cleaned_subpart)
             else:
-                recovered.append(part)
+                cleaned_part = strip_paraphrase_delimiter_token(part)
+                if cleaned_part:
+                    recovered.append(cleaned_part)
         if len(recovered) == expected_count:
             return recovered
         if abs(len(recovered) - expected_count) < abs(len(parts) - expected_count):
@@ -1052,7 +1071,7 @@ def recover_account_chunk_parts(
         return parts
 
     if len(account_items) == 1:
-        single = paraphrased_text.strip()
+        single = strip_paraphrase_delimiter_token(paraphrased_text.strip())
         if not single:
             raise RuntimeError(f"Recovery failed for single paragraph in {request_label}")
         return [single]
@@ -1178,7 +1197,7 @@ def set_paragraph_text(paragraph: PptParagraph, new_text: str) -> None:
     if not paragraph.text_nodes:
         return
 
-    safe_text = sanitize_xml_text(new_text)
+    safe_text = sanitize_xml_text(strip_paraphrase_delimiter_token(new_text))
     paragraph.text_nodes[0].text = safe_text
     for node in paragraph.text_nodes[1:]:
         node.text = ""
@@ -1308,7 +1327,7 @@ def run_step_2_paraphrase(
                 )
 
             for paragraph, new_text in zip(account_items, parts):
-                set_paragraph_text(paragraph, new_text.strip())
+                set_paragraph_text(paragraph, strip_paraphrase_delimiter_token(new_text.strip()))
                 updated_count += 1
 
     return Step2Stats(

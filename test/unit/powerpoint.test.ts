@@ -1,7 +1,11 @@
 import * as assert from "assert";
 import "mocha";
 import { OfficeMockObject } from "office-addin-mock";
-import { inferReferenceSlideIndexFromSlideTexts, insertText } from "../../src/taskpane/powerpoint";
+import {
+  inferReferenceSlideIndexFromSlideTexts,
+  insertText,
+  sanitizeParaphraseOutputText,
+} from "../../src/taskpane/powerpoint";
 
 /* global describe, global, it */
 
@@ -103,5 +107,11 @@ describe(`PowerPoint`, function () {
 
     const inferredIndex = inferReferenceSlideIndexFromSlideTexts(slideGroups);
     assert.strictEqual(inferredIndex, -1);
+  });
+
+  it("Strips internal delimiter token from paraphrase output", function () {
+    const cleaned = sanitizeParaphraseOutputText("Slide content qbpdelim123 with token removed.");
+    assert.strictEqual(cleaned.includes("qbpdelim123"), false);
+    assert.strictEqual(cleaned, "Slide content with token removed.");
   });
 });

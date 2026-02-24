@@ -1,7 +1,7 @@
 import * as assert from "assert";
 import "mocha";
 import { OfficeMockObject } from "office-addin-mock";
-import { findReferenceStartIndexFromTexts, insertText } from "../../src/taskpane/word";
+import { findReferenceStartIndexFromTexts, insertText, sanitizeParaphraseOutputText } from "../../src/taskpane/word";
 
 /* global describe, global, it, Word */
 
@@ -93,5 +93,16 @@ describe("Word", function () {
     ]);
 
     assert.strictEqual(index, -1);
+  });
+
+  it("Strips internal delimiter token from paraphrase output", function () {
+    const cleaned = sanitizeParaphraseOutputText("A critical evaluation of qbpdelim123 SDL models.");
+    assert.strictEqual(cleaned.includes("qbpdelim123"), false);
+    assert.strictEqual(cleaned, "A critical evaluation of SDL models.");
+  });
+
+  it("Strips internal delimiter token case-insensitively", function () {
+    const cleaned = sanitizeParaphraseOutputText("alpha QBPDELIM123 beta");
+    assert.strictEqual(cleaned, "alpha beta");
   });
 });

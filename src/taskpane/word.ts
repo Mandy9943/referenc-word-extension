@@ -1150,7 +1150,21 @@ interface ParaphraseParagraphMeta {
 }
 
 const PARAPHRASE_DELIMITER = "qbpdelim123";
+const ZERO_WIDTH_TEXT_RE = /[\u200B-\u200D\uFEFF]/g;
 type SinglePassMode = "standard" | "ludicrous";
+
+function stripParaphraseDelimiterToken(text: string): string {
+  return (text || "")
+    .replace(ZERO_WIDTH_TEXT_RE, "")
+    .replace(new RegExp(PARAPHRASE_DELIMITER, "ig"), " ")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+export function sanitizeParaphraseOutputText(text: string): string {
+  return stripParaphraseDelimiterToken(text);
+}
 
 export async function paraphraseDocument(): Promise<ParaphraseResult> {
   try {
@@ -1322,7 +1336,7 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
         // 1. Initial split by delimiter (relaxed regex without \\b to catch cases where delimiter is attached to words)
         let parts = text
           .split(new RegExp(`${PARAPHRASE_DELIMITER}`, "i"))
-          .map((x: string) => x.trim())
+          .map((x: string) => sanitizeParaphraseOutputText(x))
           .filter((x: string) => x.length > 0);
 
         // 2. Recovery Strategy: If we have fewer parts than expected, check for merged paragraphs
@@ -1339,11 +1353,14 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
             if (part.includes("\n\n")) {
               const subParts = part
                 .split(/\n\n+/) // Split by 2 or more newlines
-                .map((p) => p.trim())
+                .map((p) => sanitizeParaphraseOutputText(p))
                 .filter((p) => p.length > 0);
               recoveredParts.push(...subParts);
             } else {
-              recoveredParts.push(part);
+              const sanitizedPart = sanitizeParaphraseOutputText(part);
+              if (sanitizedPart) {
+                recoveredParts.push(sanitizedPart);
+              }
             }
           }
 
@@ -1414,7 +1431,7 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
 
         // Check if we have a paraphrased version for this paragraph
         if (i < allParts.length) {
-          const newText = allParts[i];
+          const newText = sanitizeParaphraseOutputText(allParts[i]);
 
           // Store texts for comparison
           originalTexts.push(meta.text);
@@ -1546,8 +1563,10 @@ export async function paraphraseSelectedText(): Promise<ParaphraseResult> {
         throw new Error("Invalid response from paraphrase API");
       }
 
+      const safeParaphrasedText = sanitizeParaphraseOutputText(paraphrasedText);
+
       // Replace the selected text with the paraphrased text
-      selection.insertText(paraphrasedText, Word.InsertLocation.replace);
+      selection.insertText(safeParaphrasedText, Word.InsertLocation.replace);
       selection.font.bold = false;
       await context.sync();
 
@@ -1620,8 +1639,10 @@ async function paraphraseSelectedTextSinglePass(mode: SinglePassMode): Promise<P
         throw new Error("Invalid response from paraphrase API");
       }
 
+      const safeParaphrasedText = sanitizeParaphraseOutputText(paraphrasedText);
+
       // Replace the selected text with the paraphrased text
-      selection.insertText(paraphrasedText, Word.InsertLocation.replace);
+      selection.insertText(safeParaphrasedText, Word.InsertLocation.replace);
       selection.font.bold = false;
       await context.sync();
 
@@ -1818,8 +1839,8 @@ async function paraphraseDocumentSinglePass(mode: SinglePassMode): Promise<Parap
       // Parse all responses
       const parseResponse = (text: string) => {
         return text
-          .split(new RegExp(`\\b${PARAPHRASE_DELIMITER}\\b`, "i"))
-          .map((x: string) => x.trim())
+          .split(new RegExp(`${PARAPHRASE_DELIMITER}`, "i"))
+          .map((x: string) => sanitizeParaphraseOutputText(x))
           .filter((x: string) => x.length > 0);
       };
 
@@ -1877,7 +1898,7 @@ async function paraphraseDocumentSinglePass(mode: SinglePassMode): Promise<Parap
 
         // Check if we have a paraphrased version for this paragraph
         if (i < allParts.length) {
-          const newText = allParts[i];
+          const newText = sanitizeParaphraseOutputText(allParts[i]);
 
           // Store texts for comparison
           originalTexts.push(meta.text);

@@ -464,6 +464,7 @@ function shuffleInPlace<T>(array: T[]): T[] {
 
 const TEXT_CAPABLE_SHAPE_TYPES = new Set(["GeometricShape", "TextBox", "Placeholder", "SmartArt", "Group"]);
 const PARAPHRASE_DELIMITER = "qbpdelim123";
+const ZERO_WIDTH_TEXT_RE = /[\u200B-\u200D\uFEFF]/g;
 const MAX_BULK_ITEMS_PER_REQUEST = 120;
 const MAX_BULK_WORDS_PER_REQUEST = 2400;
 
@@ -476,11 +477,24 @@ type EligibleShape = {
 };
 
 function countWords(text: string): number {
-  const sanitized = text.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+  const sanitized = text.replace(ZERO_WIDTH_TEXT_RE, "").trim();
   if (!sanitized) {
     return 0;
   }
   return sanitized.split(/\s+/).filter(Boolean).length;
+}
+
+function stripParaphraseDelimiterToken(text: string): string {
+  return (text || "")
+    .replace(ZERO_WIDTH_TEXT_RE, "")
+    .replace(new RegExp(PARAPHRASE_DELIMITER, "ig"), " ")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+export function sanitizeParaphraseOutputText(text: string): string {
+  return stripParaphraseDelimiterToken(text);
 }
 
 function buildBatchPayloadText(items: Array<{ text: string }>): string {
@@ -495,7 +509,7 @@ function buildBatchPayloadText(items: Array<{ text: string }>): string {
 function parseParaphraseParts(text: string, expectedCount: number): string[] {
   let parts = text
     .split(new RegExp(`${PARAPHRASE_DELIMITER}`, "i"))
-    .map((x: string) => x.trim())
+    .map((x: string) => sanitizeParaphraseOutputText(x))
     .filter((x: string) => x.length > 0);
 
   if (parts.length < expectedCount) {
@@ -506,11 +520,14 @@ function parseParaphraseParts(text: string, expectedCount: number): string[] {
       if (part.includes("\n\n")) {
         const subParts = part
           .split(/\n\n+/)
-          .map((p) => p.trim())
+          .map((p) => sanitizeParaphraseOutputText(p))
           .filter((p) => p.length > 0);
         recoveredParts.push(...subParts);
       } else {
-        recoveredParts.push(part);
+        const sanitizedPart = sanitizeParaphraseOutputText(part);
+        if (sanitizedPart) {
+          recoveredParts.push(sanitizedPart);
+        }
       }
     }
 
@@ -1297,7 +1314,7 @@ export async function paraphraseDocument(): Promise<ParaphraseResult> {
 
         for (let i = 0; i < shapesInChunk.length; i++) {
           const item = shapesInChunk[i];
-          const newText = parts[i];
+          const newText = sanitizeParaphraseOutputText(parts[i]);
 
           // Store texts for comparison
           originalTexts.push(item.text);
@@ -1505,7 +1522,7 @@ async function paraphraseDocumentSinglePass(mode: SinglePassMode): Promise<Parap
 
         for (let i = 0; i < shapesInChunk.length; i++) {
           const item = shapesInChunk[i];
-          const newText = parts[i];
+          const newText = sanitizeParaphraseOutputText(parts[i]);
 
           // Store texts for comparison
           originalTexts.push(item.text);
@@ -1777,7 +1794,7 @@ export async function paraphraseAllSlides(mode: "dual" | "standard" | "ludicrous
 
           for (let i = 0; i < shapesInChunk.length; i++) {
             const item = shapesInChunk[i];
-            const newText = parts[i];
+            const newText = sanitizeParaphraseOutputText(parts[i]);
 
             originalTexts.push(item.text);
             newTexts.push(newText);
@@ -1902,11 +1919,13 @@ async function paraphraseSelectedTextWithMode(mode: "dual" | "standard" | "ludic
           throw new Error(`Invalid batch response: missing ${mode === "dual" ? "secondMode" : "result"}`);
         }
 
-        Office.context.document.setSelectedDataAsync(paraphrasedText, (setResult) => {
+        const safeParaphrasedText = sanitizeParaphraseOutputText(paraphrasedText);
+
+        Office.context.document.setSelectedDataAsync(safeParaphrasedText, (setResult) => {
           if (setResult.status === Office.AsyncResultStatus.Failed) {
             reject(new Error(setResult.error.message));
           } else {
-            const changeMetrics = calculateTextChangeMetrics([trimmedSelectedText], [paraphrasedText]);
+            const changeMetrics = calculateTextChangeMetrics([trimmedSelectedText], [safeParaphrasedText]);
             resolve({
               message:
                 mode === "dual"
@@ -1924,7 +1943,7 @@ async function paraphraseSelectedTextWithMode(mode: "dual" | "standard" | "ludic
                 reusePercent: changeMetrics.reusePercent,
                 addedWords: changeMetrics.addedWords,
                 originalPreview: trimmedSelectedText.substring(0, 50) + "...",
-                newPreview: paraphrasedText.substring(0, 50) + "...",
+                newPreview: safeParaphrasedText.substring(0, 50) + "...",
               },
             });
           }
