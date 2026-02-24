@@ -1,3 +1,19 @@
+FROM node:20-bookworm-slim AS addin-build
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci
+
+COPY babel.config.json ./
+COPY webpack.config.js ./
+COPY tsconfig.json ./
+COPY manifest*.xml ./
+COPY assets ./assets
+COPY src ./src
+
+RUN npm run build
+
 FROM node:20-bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -19,6 +35,7 @@ COPY package*.json ./
 RUN npm install --omit=dev
 
 COPY scripts ./scripts
+COPY --from=addin-build /app/dist ./dist
 RUN python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
     && /opt/venv/bin/pip install --no-cache-dir python-docx python-pptx

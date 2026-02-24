@@ -12,6 +12,7 @@ const { spawn } = require("child_process");
 
 const repoRoot = path.resolve(__dirname, "..");
 const webRoot = path.join(__dirname, "workflow-web");
+const addinRoot = path.join(repoRoot, "dist");
 const stagingRoot = path.join(os.tmpdir(), "referenc-workflow-upload-staging");
 const jobsRoot = path.join(os.tmpdir(), "referenc-workflow-jobs");
 const pptToDocScript = path.join(repoRoot, "scripts", "pptx_to_docx_with_notes.py");
@@ -64,6 +65,7 @@ const upload = multer({
 });
 
 app.use(express.json());
+app.use("/addin", express.static(addinRoot));
 app.use(express.static(webRoot));
 
 function safeBaseName(name) {
