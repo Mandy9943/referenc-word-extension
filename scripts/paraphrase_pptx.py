@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import random
 import re
 import sys
 import urllib.error
@@ -92,6 +93,14 @@ REFERENCE_CUE_RE = re.compile(
 )
 AUTHOR_RE = re.compile(r"(?:^|[\s;])(?:[A-Z][a-z]+,\s*(?:[A-Z]\.|[A-Z][a-z]+))")
 LIST_PREFIX_RE = re.compile(r"^\s*(?:\d{1,3}[.)\]]|[-•])\s+")
+GENERIC_REFERENCE_LEAD_RE = re.compile(
+    r"^\s*(?:available at|retrieved from|accessed|doi|https?://|www\.|source\b|figure\b|table\b|slide\b|appendix\b)",
+    re.IGNORECASE,
+)
+FORMATTED_CITATION_LINE_RE = re.compile(
+    r"^\(?\s*([^,()]{2,140}?)\s*,\s*((?:19|20)\d{2}[a-z]?)\s*\)?[.;:]?\s*$",
+    re.IGNORECASE,
+)
 
 CITATION_PATTERNS = [
     re.compile(r"\[(?:[^\]]+)[,\s]\s?\d{4}[a-z]?\]"),
@@ -360,6 +369,8 @@ def is_reference_like_line(raw_line: str) -> bool:
     line = normalize_space(raw_line)
     if not line:
         return False
+    if FORMATTED_CITATION_LINE_RE.match(line):
+        return True
     if count_words(line) < 4:
         return False
 
@@ -368,6 +379,20 @@ def is_reference_like_line(raw_line: str) -> bool:
     has_cue = bool(REFERENCE_CUE_RE.search(line))
     has_author = bool(AUTHOR_RE.search(line))
     has_list_prefix = bool(LIST_PREFIX_RE.search(line))
+
+    if has_year:
+        year_match = YEAR_RE.search(line)
+        if year_match:
+            prefix = normalize_space(line[: year_match.start()].strip(" ,.;:-()[]"))
+            prefix_word_count = count_words(prefix)
+            has_compact_author_year = (
+                prefix_word_count >= 1
+                and prefix_word_count <= 8
+                and not URL_OR_DOI_RE.search(prefix)
+                and not GENERIC_REFERENCE_LEAD_RE.match(prefix)
+            )
+            if has_compact_author_year:
+                return True
 
     if has_url_or_doi and (has_year or has_author or has_list_prefix):
         return True
@@ -399,8 +424,19 @@ def infer_reference_file_number(paragraphs: Sequence[PptParagraph], kind: str) -
             continue
         grouped.setdefault(paragraph.file_number, []).append(paragraph.text)
 
+    if not grouped:
+        return -1
+
+    # Reference sections are overwhelmingly near the end; restricting inference
+    # avoids selecting random middle slides/notes with URL-heavy body text.
+    max_file_number = max(grouped)
+    min_candidate_file_number = max(1, max_file_number - 3)
+
     best_match: Optional[Tuple[int, int]] = None
     for file_number, texts in grouped.items():
+        if file_number < min_candidate_file_number:
+            continue
+
         reference_line_count = 0
         dense_paragraph_count = 0
         url_or_doi_paragraph_count = 0
@@ -438,12 +474,15 @@ def detect_reference_section(paragraphs: Sequence[PptParagraph]) -> Optional[Ref
         if not matches_reference_header(paragraph.text):
             continue
 
-        reference_keys: Set[ParagraphKey] = {paragraph_key(paragraph)}
-        for candidate in paragraphs:
-            if candidate.archive_path == paragraph.archive_path and candidate.paragraph_index < paragraph.paragraph_index:
-                reference_keys.add(paragraph_key(candidate))
-        for tail in paragraphs[idx + 1 :]:
-            reference_keys.add(paragraph_key(tail))
+        # Keep header-based extraction scoped to the same text container from
+        # the header onward. Including preceding/other-slide text can pollute
+        # parsed references with body paragraphs.
+        reference_keys: Set[ParagraphKey] = {
+            paragraph_key(candidate)
+            for candidate in paragraphs
+            if candidate.archive_path == paragraph.archive_path
+            and candidate.paragraph_index >= paragraph.paragraph_index
+        }
 
         return ReferenceDetection(mode="header", reference_keys=reference_keys)
 
@@ -508,7 +547,7 @@ def append_citation_at_sentence_end(sentence: str, citation: str) -> str:
     return f"{core}{sep}{citation}{punctuation}"
 
 
-def select_sentence_index_for_citation(text: str) -> int:
+def citation_sentence_indexes(text: str) -> List[int]:
     sentences = split_sentences(text)
     candidate_indexes: List[int] = []
 
@@ -535,24 +574,100 @@ def select_sentence_index_for_citation(text: str) -> int:
         candidate_indexes.append(i)
 
     if candidate_indexes:
-        return candidate_indexes[-1]
+        return candidate_indexes
 
     if not EXISTING_CITATION_RE.search(text) and count_words(text) >= 8:
-        return max(0, len(sentences) - 1)
+        return [max(0, len(sentences) - 1)]
 
-    return -1
+    return []
 
 
-def inject_citation_into_paragraph(text: str, citation: str) -> Tuple[str, bool]:
+def is_valid_author_word(token: str) -> bool:
+    cleaned = token.strip(" ,.;:-()[]{}\"'")
+    if not cleaned:
+        return False
+    if "/" in cleaned or "\\" in cleaned or "_" in cleaned:
+        return False
+    if re.search(r"\d", cleaned):
+        return False
+    letters_only = re.sub(r"[^A-Za-z]", "", cleaned)
+    if len(letters_only) < 2:
+        return False
+    return True
+
+
+def extract_author_label(prefix: str) -> Optional[str]:
+    normalized = URL_OR_DOI_RE.sub(" ", prefix)
+    normalized = re.sub(r"\[[^\]]*]", " ", normalized)
+    normalized = re.sub(r"\([^)]*\)", " ", normalized)
+    normalized = re.sub(r"\b(?:available at|retrieved from|accessed|doi)\b.*$", "", normalized, flags=re.IGNORECASE)
+    normalized = normalize_space(normalized.strip(" ,.;:-()[]"))
+    if not normalized:
+        return None
+    if GENERIC_REFERENCE_LEAD_RE.match(normalized):
+        return None
+
+    author = normalized
+    for separator in (",", " and ", " et al"):
+        separator_index = author.lower().find(separator.lower())
+        if separator_index > 0:
+            author = author[:separator_index]
+            break
+
+    author_words = [token.strip(" ,.;:-()[]{}\"'") for token in author.split() if is_valid_author_word(token)]
+    if not author_words:
+        return None
+
+    label = " ".join(author_words[:4]).strip()
+    return label if label else None
+
+
+def choose_reference_index(rng: random.Random, citation_count: int, used_reference_indexes: Set[int]) -> int:
+    if citation_count <= 0:
+        return 0
+    if len(used_reference_indexes) < citation_count:
+        pool = [index for index in range(citation_count) if index not in used_reference_indexes]
+        selected = rng.choice(pool)
+        used_reference_indexes.add(selected)
+        return selected
+    return rng.randrange(citation_count)
+
+
+def inject_citations_into_paragraph(
+    text: str,
+    citations: Sequence[str],
+    rng: random.Random,
+    used_reference_indexes: Set[int],
+) -> Tuple[str, int]:
     sentences = split_sentences(text)
-    sentence_index = select_sentence_index_for_citation(text)
-    if sentence_index == -1:
-        return text, False
+    sentence_indexes = citation_sentence_indexes(text)
+    if not sentence_indexes:
+        return text, 0
+
+    max_insertions = min(3, len(sentence_indexes))
+    if max_insertions >= 3:
+        insertion_count = 2 + rng.randint(0, 1)  # 2 or 3
+    elif max_insertions == 2:
+        insertion_count = 2
+    else:
+        insertion_count = 1
+
+    selected_indexes = sorted(rng.sample(sentence_indexes, insertion_count))
 
     updated_sentences = list(sentences)
-    updated_sentences[sentence_index] = append_citation_at_sentence_end(updated_sentences[sentence_index], citation)
+    inserted = 0
+    for sentence_index in selected_indexes:
+        reference_index = choose_reference_index(rng, len(citations), used_reference_indexes)
+        citation = citations[reference_index]
+        new_sentence = append_citation_at_sentence_end(updated_sentences[sentence_index], citation)
+        if new_sentence != updated_sentences[sentence_index]:
+            updated_sentences[sentence_index] = new_sentence
+            inserted += 1
+
     reconstructed = "".join(updated_sentences)
-    return reconstructed, reconstructed != text
+    if reconstructed == text:
+        return text, 0
+    return reconstructed, inserted
 
 
 def remove_citations_links_and_weird_tokens(text: str) -> Tuple[str, int, int, int]:
@@ -1241,29 +1356,36 @@ def extract_reference_entries(paragraphs: Sequence[PptParagraph], reference_keys
     return deduped
 
 
-def build_citation_from_reference(reference: str, index: int) -> str:
+def build_citation_from_reference(reference: str, index: int) -> Optional[str]:
+    del index
+
     cleaned = re.sub(r"^\s*(?:\d{1,3}[.)\]]|[-•])\s*", "", reference).strip(" .;:")
     if not cleaned:
-        return f"(Source {index + 1})"
+        return None
+    if GENERIC_REFERENCE_LEAD_RE.match(cleaned):
+        return None
+
+    formatted_match = FORMATTED_CITATION_LINE_RE.match(cleaned)
+    if formatted_match:
+        author = extract_author_label(formatted_match.group(1))
+        if author:
+            return f"({author}, {formatted_match.group(2)})"
 
     year_match = YEAR_RE.search(cleaned)
-    year = year_match.group(0) if year_match else None
+    if not year_match:
+        return None
 
-    prefix = cleaned[: year_match.start()] if year_match else cleaned
-    prefix = prefix.strip(" ,.;:-()[]")
-    author = ""
-    if "," in prefix:
-        author = prefix.split(",", 1)[0].strip()
+    # In curated reference formats the year appears close to the author name.
+    # If it appears far into a sentence, this is likely body text, not a ref.
+    if year_match.start() > 120:
+        return None
+
+    year = year_match.group(0)
+    author = extract_author_label(cleaned[: year_match.start()])
     if not author:
-        words = [w.strip(" ,.;:-()[]") for w in prefix.split() if w.strip(" ,.;:-()[]")]
-        author = " ".join(words[:4])
+        return None
 
-    if not author:
-        author = f"Source {index + 1}"
-
-    if year:
-        return f"({author}, {year})"
-    return f"({author})"
+    return f"({author}, {year})"
 
 
 def build_step_3_eligible_paragraphs(
@@ -1301,34 +1423,50 @@ def run_step_3_add_references(paragraphs: Sequence[PptParagraph]) -> Step3Stats:
             "No in-text references were added."
         )
 
-    citations = [build_citation_from_reference(ref, idx) for idx, ref in enumerate(references)]
+    citations: List[str] = []
+    skipped_references = 0
+    for idx, ref in enumerate(references):
+        citation = build_citation_from_reference(ref, idx)
+        if citation:
+            citations.append(citation)
+        else:
+            skipped_references += 1
+
     if not citations:
-        raise RuntimeError("Unable to build citation labels from detected references.")
+        raise RuntimeError(
+            "Reference section was detected, but no valid author-year entries were parsed. "
+            "Please run Add References first and keep a standard reference format."
+        )
+    if skipped_references:
+        print(f"[3/4] warning: skipped {skipped_references} non-standard reference entries")
 
     candidates = build_step_3_eligible_paragraphs(paragraphs, detection.reference_keys)
     if not candidates:
         raise RuntimeError("No eligible slide/notes paragraphs found for inserting references.")
 
     notes_candidates = [paragraph for paragraph in candidates if paragraph.kind == "notes"]
-    target_count = min(len(candidates), max(1, len(citations)))
     inserted_total = 0
     inserted_slide = 0
     inserted_notes = 0
-    citation_cursor = 0
+    rng = random.Random()
+    used_reference_indexes: Set[int] = set()
     inserted_keys: Set[ParagraphKey] = set()
 
     # Ensure notes get at least one citation when eligible notes paragraphs exist.
     if notes_candidates:
         note_inserted = False
         for paragraph in notes_candidates:
-            citation = citations[citation_cursor % len(citations)]
-            updated_text, changed = inject_citation_into_paragraph(paragraph.text, citation)
-            if not changed:
+            updated_text, inserted_count = inject_citations_into_paragraph(
+                paragraph.text,
+                citations,
+                rng,
+                used_reference_indexes,
+            )
+            if inserted_count <= 0:
                 continue
             set_paragraph_text(paragraph, updated_text)
-            inserted_total += 1
+            inserted_total += inserted_count
             inserted_notes += 1
-            citation_cursor += 1
             inserted_keys.add(paragraph_key(paragraph))
             note_inserted = True
             break
@@ -1339,19 +1477,20 @@ def run_step_3_add_references(paragraphs: Sequence[PptParagraph]) -> Step3Stats:
             )
 
     for paragraph in candidates:
-        if inserted_total >= target_count:
-            break
         if paragraph_key(paragraph) in inserted_keys:
             continue
 
-        citation = citations[citation_cursor % len(citations)]
-        updated_text, changed = inject_citation_into_paragraph(paragraph.text, citation)
-        if not changed:
+        updated_text, inserted_count = inject_citations_into_paragraph(
+            paragraph.text,
+            citations,
+            rng,
+            used_reference_indexes,
+        )
+        if inserted_count <= 0:
             continue
 
         set_paragraph_text(paragraph, updated_text)
-        inserted_total += 1
-        citation_cursor += 1
+        inserted_total += inserted_count
         if paragraph.kind == "slide":
             inserted_slide += 1
         else:
@@ -1368,7 +1507,7 @@ def run_step_3_add_references(paragraphs: Sequence[PptParagraph]) -> Step3Stats:
 
     return Step3Stats(
         detection_mode=detection.mode,
-        reference_count=len(references),
+        reference_count=len(citations),
         inserted_citations=inserted_total,
         inserted_slide_paragraphs=inserted_slide,
         inserted_notes_paragraphs=inserted_notes,
