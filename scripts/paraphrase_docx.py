@@ -11,20 +11,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import re
 import sys
-import time
-import traceback
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
-
-from pipeline_observability import append_pipeline_log, local_now_pretty, utc_now_iso
 
 API_URL_DEFAULT = "https://analizeai.com/paraphrase-batch"
 PARAPHRASE_DELIMITER = "qbpdelim123"
@@ -164,9 +161,6 @@ class Step2Stats:
     request_count: int
     total_words: int
     mode: str
-    request_summaries: List[Dict[str, Any]]
-    initial_chunk_failures: int
-    recovery_attempts: int
 
 
 @dataclass
@@ -888,7 +882,7 @@ def extract_account_output(
     account_key: str,
     mode: str,
     request_label: str,
-) -> Tuple[str, Optional[str]]:
+) -> str:
     account_result = response.get(account_key)
     if not isinstance(account_result, dict):
         raise RuntimeError(f"Missing response for account {account_key} in {request_label}")
@@ -902,8 +896,7 @@ def extract_account_output(
     if fallback_used:
         print(f"[{request_label}] warning: {account_key} used fallback {fallback_used}")
 
-    fallback_label: Optional[str] = str(fallback_used) if fallback_used else None
-    return str(paraphrased), fallback_label
+    return str(paraphrased)
 
 
 def recovery_account_order(preferred_account_key: str) -> List[str]:
@@ -930,8 +923,7 @@ def request_chunk_output_with_fallback(
         try:
             payload = {"mode": mode, key: payload_text}
             response = post_batch_request(api_url, payload, timeout_seconds)
-            output, _fallback = extract_account_output(response, key, mode, request_label)
-            return output
+            return extract_account_output(response, key, mode, request_label)
         except Exception as error:  # pylint: disable=broad-except
             errors.append(f"{key}: {error}")
             print(f"[{request_label}] warning: recovery via {key} failed ({error})")
@@ -1249,9 +1241,6 @@ def run_step_2_paraphrase(
 
     request_count = 0
     updated_count = 0
-    request_summaries: List[Dict[str, Any]] = []
-    initial_chunk_failures = 0
-    recovery_attempts = 0
     cursor = 0
     total_words = sum(item.word_count for item in items)
     paragraph_by_index = {p.index: p for p in paragraphs}
@@ -1269,14 +1258,12 @@ def run_step_2_paraphrase(
             mode,
             scheduler_snapshot,
         )
-        trimmed_for_single_account = False
 
         # Guardrail: when only one account is currently usable, keep request size
         # within per-account bounds to avoid long click/retry failure storms.
         if len(selected_accounts) == 1 and len(batch) > 1:
             max_single_account_words = MODE_MAX_WORDS_PER_ACCOUNT.get(mode, max_words_per_request)
             if batch_words > max_single_account_words:
-                trimmed_for_single_account = True
                 original_count = len(batch)
                 while len(batch) > 1 and batch_words > max_single_account_words:
                     moved = batch.pop()
@@ -1294,23 +1281,6 @@ def run_step_2_paraphrase(
                 )
 
         account_chunks = split_into_account_chunks(batch, selected_accounts)
-        chunk_words_by_account = {
-            account_key: sum(item.word_count for item in account_items)
-            for account_key, account_items in account_chunks
-        }
-        request_summaries.append(
-            {
-                "request_index": request_count,
-                "paragraphs": len(batch),
-                "words": batch_words,
-                "account_count": len(account_chunks),
-                "accounts": list(selected_accounts),
-                "effective_capacity": effective_capacity,
-                "estimated_seconds": estimated_seconds,
-                "trimmed_for_single_account": trimmed_for_single_account,
-                "chunk_words_by_account": chunk_words_by_account,
-            }
-        )
 
         payload: Dict[str, str] = {"mode": mode}
         for account_key, account_items in account_chunks:
@@ -1325,17 +1295,13 @@ def run_step_2_paraphrase(
         for account_key, account_items in account_chunks:
             request_label = f"request {request_count} {account_key}"
             try:
-                paraphrased, _fallback_used = extract_account_output(
-                    response, account_key, mode, f"request {request_count}"
-                )
+                paraphrased = extract_account_output(response, account_key, mode, f"request {request_count}")
                 parts = parse_paraphrase_parts(paraphrased, len(account_items))
             except Exception as error:  # pylint: disable=broad-except
-                initial_chunk_failures += 1
                 print(f"[{request_label}] warning: initial chunk failed ({error}); retrying with recovery")
                 parts = []
 
             if len(parts) != len(account_items):
-                recovery_attempts += 1
                 parts = recover_account_chunk_parts(
                     account_key=account_key,
                     account_items=account_items,
@@ -1364,9 +1330,6 @@ def run_step_2_paraphrase(
         request_count=request_count,
         total_words=total_words,
         mode=mode,
-        request_summaries=request_summaries,
-        initial_chunk_failures=initial_chunk_failures,
-        recovery_attempts=recovery_attempts,
     )
 
 
@@ -1701,80 +1664,20 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     random.seed(42)
     args = parse_args()
-    run_started_perf = time.perf_counter()
-    run_started_local = local_now_pretty()
-    run_id = f"docx-{int(time.time())}"
-    step_durations: Dict[str, float] = {}
-    step1_payload: Dict[str, Any] = {}
-    step2_payload: Dict[str, Any] = {}
-    step3_payload: Dict[str, Any] = {}
-    request_summaries: List[Dict[str, Any]] = []
-    input_path: Optional[Path] = None
-    output_path: Optional[Path] = None
-    mode = "dual"
-    error_step = ""
-    error_message = ""
-    error_traceback = ""
-    paragraph_count = 0
-    reference_start_index = -1
-    eligible_count = 0
-
-    def finalize(status: str, exit_code: int) -> int:
-        total_duration = time.perf_counter() - run_started_perf
-        step2_total_words = 0
-        if isinstance(step2_payload, dict) and step2_payload:
-            step2_total_words = int(step2_payload.get("total_words", 0) or 0)
-            if not request_summaries and isinstance(step2_payload.get("request_summaries"), list):
-                request_summaries.extend(step2_payload.get("request_summaries", []))
-        append_pipeline_log(
-            {
-                "workflow": "docx",
-                "run_id": run_id,
-                "status": status,
-                "mode": mode,
-                "started_at_local": run_started_local,
-                "started_at_utc": utc_now_iso(),
-                "dry_run": bool(args.dry_run),
-                "input_path": str(input_path) if input_path else "",
-                "output_path": str(output_path) if output_path else "",
-                "paragraph_count": paragraph_count,
-                "reference_start_index": reference_start_index,
-                "eligible_count": eligible_count,
-                "total_duration_seconds": total_duration,
-                "step_durations": step_durations,
-                "step1_stats": step1_payload,
-                "step2_stats": step2_payload,
-                "step3_stats": step3_payload,
-                "step2_request_summaries": request_summaries,
-                "step2_total_words": step2_total_words,
-                "step2_initial_chunk_failures": int(step2_payload.get("initial_chunk_failures", 0) or 0),
-                "step2_recovery_attempts": int(step2_payload.get("recovery_attempts", 0) or 0),
-                "error_step": error_step,
-                "error_message": error_message,
-                "traceback": error_traceback,
-            }
-        )
-        return exit_code
 
     try:
         mode, provided_input = parse_mode_and_input(args.positional, args.mode)
         input_path = resolve_input_path(provided_input)
     except RuntimeError as error:
-        error_step = "bootstrap"
-        error_message = str(error)
-        print(error_message, file=sys.stderr)
-        return finalize("failed", 1)
+        print(str(error), file=sys.stderr)
+        return 1
 
     if not input_path.exists():
-        error_step = "bootstrap"
-        error_message = f"Input file does not exist: {input_path}"
-        print(error_message, file=sys.stderr)
-        return finalize("failed", 1)
+        print(f"Input file does not exist: {input_path}", file=sys.stderr)
+        return 1
     if input_path.suffix.lower() != ".docx":
-        error_step = "bootstrap"
-        error_message = f"Input must be a .docx file: {input_path}"
-        print(error_message, file=sys.stderr)
-        return finalize("failed", 1)
+        print(f"Input must be a .docx file: {input_path}", file=sys.stderr)
+        return 1
 
     output_path = args.output if args.output else input_path.with_name(f"pr {input_path.name}")
     namespace_declarations: Dict[str, str] = {}
@@ -1782,39 +1685,28 @@ def main() -> int:
     try:
         with zipfile.ZipFile(input_path, "r") as input_zip:
             if "word/document.xml" not in input_zip.namelist():
-                error_step = "bootstrap"
-                error_message = "Invalid DOCX: missing word/document.xml"
-                print(error_message, file=sys.stderr)
-                return finalize("failed", 1)
+                print("Invalid DOCX: missing word/document.xml", file=sys.stderr)
+                return 1
             document_xml_bytes = input_zip.read("word/document.xml")
             namespace_declarations = extract_namespace_declarations(
                 document_xml_bytes.decode("utf-8", errors="replace")
             )
             root = ET.fromstring(document_xml_bytes)
     except Exception as error:  # pylint: disable=broad-except
-        error_step = "bootstrap"
-        error_message = f"Failed to read DOCX: {error}"
-        error_traceback = traceback.format_exc()
-        print(error_message, file=sys.stderr)
-        return finalize("failed", 1)
+        print(f"Failed to read DOCX: {error}", file=sys.stderr)
+        return 1
 
     paragraphs = collect_paragraphs(root)
-    paragraph_count = len(paragraphs)
     if not paragraphs:
-        error_step = "bootstrap"
-        error_message = "No paragraphs found in the document. Aborting."
-        print(error_message, file=sys.stderr)
-        return finalize("failed", 1)
+        print("No paragraphs found in the document. Aborting.", file=sys.stderr)
+        return 1
 
     # Initial reference detection for section-aware clean/paraphrase.
-    reference_start_index, reference_detection_mode = detect_reference_section(paragraphs)
+    reference_start_index, _ = detect_reference_section(paragraphs)
 
     print("[1/4] Clean (weird numbers + in-text citations, keep headings/subtitles) ...", flush=True)
     try:
-        step_started = time.perf_counter()
         step1 = run_step_1_clean(paragraphs, reference_start_index)
-        step_durations["step1_clean"] = round(time.perf_counter() - step_started, 3)
-        step1_payload = asdict(step1)
         print(
             "[1/4] OK"
             f" | updated_paragraphs={step1.cleaned_paragraphs}"
@@ -1822,41 +1714,11 @@ def main() -> int:
             f", removed_weird_numbers={step1.removed_weird_numbers}"
         )
     except Exception as error:  # pylint: disable=broad-except
-        error_step = "step1_clean"
-        error_message = str(error)
-        error_traceback = traceback.format_exc()
         print(f"[1/4] FAILED: {error}", file=sys.stderr)
-        return finalize("failed", 1)
-
-    # Fail fast before expensive paraphrase if we cannot reliably add references later.
-    try:
-        reference_start_index, reference_detection_mode = detect_reference_section(paragraphs)
-        if reference_start_index == -1:
-            raise RuntimeError("Could not detect a reference section for citation insertion.")
-        preflight_references = extract_reference_entries(paragraphs, reference_start_index)
-        if not preflight_references:
-            raise RuntimeError("Reference section found, but no usable references were parsed.")
-        print(
-            "[preflight] Reference section ready"
-            f" | detection={reference_detection_mode}"
-            f", reference_start={reference_start_index}"
-            f", parsed_references={len(preflight_references)}"
-        )
-    except Exception as error:  # pylint: disable=broad-except
-        error_step = "step3_precheck"
-        error_message = str(error)
-        error_traceback = traceback.format_exc()
-        print(
-            "[preflight] FAILED: "
-            f"{error}\n"
-            "No output file was written. Review references formatting before sending this document.",
-            file=sys.stderr,
-        )
-        return finalize("failed", 1)
+        return 1
 
     print(f"[2/4] Paraphrase ({'SIMPLE+SHORT' if mode == 'dual' else 'STANDARD'}) ...", flush=True)
     try:
-        step_started = time.perf_counter()
         if args.dry_run:
             eligible_count = sum(
                 1
@@ -1869,16 +1731,6 @@ def main() -> int:
             )
             if eligible_count == 0:
                 raise RuntimeError("No eligible body paragraphs found for paraphrasing.")
-            step2_payload = {
-                "paraphrased_paragraphs": 0,
-                "request_count": 0,
-                "total_words": 0,
-                "mode": mode,
-                "request_summaries": [],
-                "initial_chunk_failures": 0,
-                "recovery_attempts": 0,
-                "dry_run_eligible_paragraphs": eligible_count,
-            }
             print(f"[2/4] DRY-RUN OK | eligible_paragraphs={eligible_count}, mode={mode}")
         else:
             step2 = run_step_2_paraphrase(
@@ -1890,8 +1742,6 @@ def main() -> int:
                 max_words_per_request=args.max_words_per_request,
                 reference_start_index=reference_start_index,
             )
-            step2_payload = asdict(step2)
-            request_summaries = step2.request_summaries
             print(
                 "[2/4] OK"
                 f" | paraphrased_paragraphs={step2.paraphrased_paragraphs}"
@@ -1899,17 +1749,12 @@ def main() -> int:
                 f", words={step2.total_words}"
                 f", mode={step2.mode}"
             )
-        step_durations["step2_paraphrase"] = round(time.perf_counter() - step_started, 3)
     except Exception as error:  # pylint: disable=broad-except
-        error_step = "step2_paraphrase"
-        error_message = str(error)
-        error_traceback = traceback.format_exc()
         print(f"[2/4] FAILED: {error}", file=sys.stderr)
-        return finalize("failed", 1)
+        return 1
 
     print("[3/4] Add new in-text references ...", flush=True)
     try:
-        step_started = time.perf_counter()
         if args.dry_run:
             ref_start, ref_mode = detect_reference_section(paragraphs)
             if ref_start == -1:
@@ -1917,12 +1762,6 @@ def main() -> int:
             refs = extract_reference_entries(paragraphs, ref_start)
             if not refs:
                 raise RuntimeError("Reference section found, but no usable references were parsed.")
-            step3_payload = {
-                "detection_mode": ref_mode,
-                "reference_start_index": ref_start,
-                "reference_count": len(refs),
-                "inserted_citations": 0,
-            }
             print(
                 "[3/4] DRY-RUN OK"
                 f" | detection={ref_mode}"
@@ -1931,7 +1770,6 @@ def main() -> int:
             )
         else:
             step3 = run_step_3_add_references(paragraphs)
-            step3_payload = asdict(step3)
             print(
                 "[3/4] OK"
                 f" | detection={step3.detection_mode}"
@@ -1939,40 +1777,31 @@ def main() -> int:
                 f", parsed_references={step3.reference_count}"
                 f", inserted_citations={step3.inserted_citations}"
             )
-        step_durations["step3_references"] = round(time.perf_counter() - step_started, 3)
     except Exception as error:  # pylint: disable=broad-except
-        error_step = "step3_references"
-        error_message = str(error)
-        error_traceback = traceback.format_exc()
         print(
             "[3/4] FAILED: "
             f"{error}\n"
             "No output file was written. Review references formatting before sending this document.",
             file=sys.stderr,
         )
-        return finalize("failed", 1)
+        return 1
 
     print("[4/4] Write output DOCX ...", flush=True)
     try:
-        step_started = time.perf_counter()
         if args.dry_run:
             print("[4/4] DRY-RUN OK | no file written")
         else:
             write_output_docx(input_path, output_path, root, namespace_declarations)
             print(f"[4/4] OK | output={output_path}")
-        step_durations["step4_write_output"] = round(time.perf_counter() - step_started, 3)
     except Exception as error:  # pylint: disable=broad-except
-        error_step = "step4_write_output"
-        error_message = str(error)
-        error_traceback = traceback.format_exc()
         print(f"[4/4] FAILED: {error}", file=sys.stderr)
-        return finalize("failed", 1)
+        return 1
 
     if args.dry_run:
         print("Pipeline dry-run completed successfully.")
     else:
         print("Pipeline completed successfully.")
-    return finalize("success", 0)
+    return 0
 
 
 if __name__ == "__main__":

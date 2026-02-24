@@ -16,7 +16,6 @@ import {
   removeReferences,
   removeWeirdNumbers,
 } from "../taskpane";
-import { createTelemetryRequestId, emitAddinTelemetry } from "../addinTelemetry";
 
 const useStyles = makeStyles({
   root: {
@@ -167,48 +166,17 @@ const App: React.FC = () => {
     });
   }, []);
 
-  const toErrorMessage = (error: unknown): string => {
-    if (error instanceof Error && error.message) {
-      return error.message;
-    }
-    return String(error || "An error occurred");
-  };
-
   const handleAnalyzeDocument = async () => {
     setStatus("loading");
     setWarnings([]);
     setErrorMessage(null);
-    const startedAt = Date.now();
-    const requestId = createTelemetryRequestId("add_references", "n/a");
-    void emitAddinTelemetry({
-      action: "add_references",
-      status: "start",
-      mode: "n/a",
-      metadata: { requestId, insertEveryOther },
-    });
     try {
       // @ts-ignore
       await analyzeDocument(insertEveryOther);
       setStatus("success");
-      void emitAddinTelemetry({
-        action: "add_references",
-        status: "success",
-        mode: "n/a",
-        durationMs: Date.now() - startedAt,
-        metadata: { requestId, insertEveryOther },
-      });
     } catch (error) {
       setStatus("error");
-      const message = toErrorMessage(error);
-      setErrorMessage(message);
-      void emitAddinTelemetry({
-        action: "add_references",
-        status: "error",
-        mode: "n/a",
-        durationMs: Date.now() - startedAt,
-        errorMessage: message,
-        metadata: { requestId, insertEveryOther },
-      });
+      setErrorMessage(error.message || "An error occurred");
     }
   };
 
@@ -216,47 +184,19 @@ const App: React.FC = () => {
     setStatus("loading");
     setWarnings([]);
     setErrorMessage(null);
-    const startedAt = Date.now();
-    const requestId = createTelemetryRequestId("clean", "n/a");
-    void emitAddinTelemetry({
-      action: "clean",
-      status: "start",
-      mode: "n/a",
-      metadata: { requestId },
-    });
     try {
       await removeReferences();
       await removeLinks(false);
       await removeWeirdNumbers();
       await normalizeBoldText();
       setStatus("success");
-      void emitAddinTelemetry({
-        action: "clean",
-        status: "success",
-        mode: "n/a",
-        durationMs: Date.now() - startedAt,
-        metadata: { requestId },
-      });
     } catch (error) {
       setStatus("error");
-      const message = toErrorMessage(error);
-      setErrorMessage(message);
-      void emitAddinTelemetry({
-        action: "clean",
-        status: "error",
-        mode: "n/a",
-        durationMs: Date.now() - startedAt,
-        errorMessage: message,
-        metadata: { requestId },
-      });
+      setErrorMessage(error.message || "An error occurred");
     }
   };
 
-  const runParaphraseAction = async (
-    action: () => Promise<ParaphraseResult>,
-    actionName: string,
-    mode: "dual" | "standard" | "ludicrous"
-  ) => {
+  const runParaphraseAction = async (action: () => Promise<ParaphraseResult>) => {
     setStatus("loading");
     setParaphraseTime(0);
     setFailedAccount(null);
@@ -264,13 +204,6 @@ const App: React.FC = () => {
     setErrorMessage(null);
     setChangeMetrics(null);
     const startTime = Date.now();
-    const requestId = createTelemetryRequestId(actionName, mode);
-    void emitAddinTelemetry({
-      action: actionName,
-      status: "start",
-      mode,
-      metadata: { requestId },
-    });
 
     if (timerRef.current) clearInterval(timerRef.current);
 
@@ -288,39 +221,16 @@ const App: React.FC = () => {
       if (result.metrics) {
         setChangeMetrics(result.metrics);
       }
-      void emitAddinTelemetry({
-        action: actionName,
-        status: "success",
-        mode,
-        durationMs: Date.now() - startTime,
-        warningCount: result.warnings ? result.warnings.length : 0,
-        metadata: {
-          requestId,
-          hasMetrics: Boolean(result.metrics),
-          originalWordCount: result.metrics?.originalWordCount ?? null,
-          newWordCount: result.metrics?.newWordCount ?? null,
-          wordsChanged: result.metrics?.wordsChanged ?? null,
-        },
-      });
     } catch (error) {
       setStatus("error");
-      const message = toErrorMessage(error);
-      setErrorMessage(message);
+      setErrorMessage(error.message || "An error occurred");
       // Extract failed account info from error message if available
-      if (message) {
-        const match = message.match(/Account (acc[123]) failed/);
+      if (error.message) {
+        const match = error.message.match(/Account (acc[123]) failed/);
         if (match) {
           setFailedAccount({ accountId: match[1] });
         }
       }
-      void emitAddinTelemetry({
-        action: actionName,
-        status: "error",
-        mode,
-        durationMs: Date.now() - startTime,
-        errorMessage: message,
-        metadata: { requestId },
-      });
     } finally {
       if (timerRef.current) {
         clearInterval(timerRef.current);
@@ -330,23 +240,23 @@ const App: React.FC = () => {
   };
 
   const handleParaphraseTextStandard = async () => {
-    await runParaphraseAction(paraphraseSelectedTextStandard, "paraphrase_selection_or_document", "standard");
+    await runParaphraseAction(paraphraseSelectedTextStandard);
   };
 
   const handleParaphraseTextLudicrous = async () => {
-    await runParaphraseAction(paraphraseSelectedTextLudicrous, "paraphrase_selection_or_document", "ludicrous");
+    await runParaphraseAction(paraphraseSelectedTextLudicrous);
   };
 
   const handleParaphraseAllSlides = async () => {
-    await runParaphraseAction(paraphraseAllSlides, "paraphrase_all_slides", "dual");
+    await runParaphraseAction(paraphraseAllSlides);
   };
 
   const handleParaphraseAllSlidesStandard = async () => {
-    await runParaphraseAction(paraphraseAllSlidesStandard, "paraphrase_all_slides", "standard");
+    await runParaphraseAction(paraphraseAllSlidesStandard);
   };
 
   const handleParaphraseAllSlidesLudicrous = async () => {
-    await runParaphraseAction(paraphraseAllSlidesLudicrous, "paraphrase_all_slides", "ludicrous");
+    await runParaphraseAction(paraphraseAllSlidesLudicrous);
   };
 
   const handleRestartAccount = async () => {
@@ -354,16 +264,8 @@ const App: React.FC = () => {
 
     try {
       setStatus("loading");
-      const startedAt = Date.now();
-      const requestId = createTelemetryRequestId("restart_account", "n/a");
       const restartUrl = `https://analizeai.com/restart/${failedAccount.accountId}`;
       console.log(`Restarting account: ${restartUrl}`);
-      void emitAddinTelemetry({
-        action: "restart_account",
-        status: "start",
-        mode: "n/a",
-        metadata: { requestId, accountId: failedAccount.accountId },
-      });
 
       const response = await fetch(restartUrl, {
         method: "POST",
@@ -373,37 +275,14 @@ const App: React.FC = () => {
         setStatus("success");
         setFailedAccount(null);
         setErrorMessage(null);
-        void emitAddinTelemetry({
-          action: "restart_account",
-          status: "success",
-          mode: "n/a",
-          durationMs: Date.now() - startedAt,
-          metadata: { requestId, accountId: failedAccount.accountId },
-        });
       } else {
         setStatus("error");
         setErrorMessage(`Failed to restart account: ${response.status}`);
-        void emitAddinTelemetry({
-          action: "restart_account",
-          status: "error",
-          mode: "n/a",
-          durationMs: Date.now() - startedAt,
-          errorMessage: `Failed to restart account: ${response.status}`,
-          metadata: { requestId, accountId: failedAccount.accountId },
-        });
       }
     } catch (error) {
       console.error("Error restarting account:", error);
       setStatus("error");
-      const message = toErrorMessage(error);
-      setErrorMessage(message || "Failed to restart account");
-      void emitAddinTelemetry({
-        action: "restart_account",
-        status: "error",
-        mode: "n/a",
-        errorMessage: message,
-        metadata: { accountId: failedAccount.accountId },
-      });
+      setErrorMessage(error.message || "Failed to restart account");
     }
   };
 
