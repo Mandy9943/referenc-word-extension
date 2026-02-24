@@ -24,7 +24,8 @@
     ]
   },
   "exclude": [
-    "node_modules"
+    "node_modules",
+    "cloudflare"
   ],
   "compileOnSave": false,
   "buildOnSave": false,
