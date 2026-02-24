@@ -1,0 +1,30 @@
+{
+  "name": "referenc-workflow-cloud",
+  "main": "cloudflare/worker/src/index.ts",
+  "compatibility_date": "2026-02-24",
+  "containers": [
+    {
+      "class_name": "WorkflowContainer",
+      "image": "./Dockerfile.cloudflare",
+      "instance_type": "standard-2",
+      "max_instances": 3
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "WORKFLOW_CONTAINER",
+        "class_name": "WorkflowContainer"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["WorkflowContainer"]
+    }
+  ],
+  "vars": {
+    "WORKFLOW_CONTAINER_NAME": "workflow-web-singleton"
+  }
+}

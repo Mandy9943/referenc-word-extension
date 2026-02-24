@@ -94,7 +94,7 @@ REFERENCE_CUE_RE = re.compile(
     re.IGNORECASE,
 )
 AUTHOR_RE = re.compile(r"(?:^|[\s;])(?:[A-Z][a-z]+,\s*(?:[A-Z]\.|[A-Z][a-z]+))")
-LIST_PREFIX_RE = re.compile(r"^\s*(?:\d{1,3}[.)\]]|[-•])\s+")
+LIST_PREFIX_RE = re.compile(r"^\s*(?:\[\d{1,3}\]|\d{1,3}[.)\]]|[-•])\s+")
 
 TOC_HEADER_PATTERNS = [
     re.compile(rf"^\s*{NUMBERING_PREFIX}table\s+of\s+contents?\s*{TRAILING_PUNCTUATION}\s*$", re.IGNORECASE),
@@ -1377,7 +1377,7 @@ def extract_reference_entries(paragraphs: Sequence[Paragraph], reference_start_i
 
 
 def build_citation_from_reference(reference: str, index: int) -> str:
-    cleaned = re.sub(r"^\s*(?:\d{1,3}[.)\]]|[-•])\s*", "", reference).strip(" .;:")
+    cleaned = re.sub(r"^\s*(?:\[\d{1,3}\]|\d{1,3}[.)\]]|[-•])\s*", "", reference).strip(" .;:")
     if not cleaned:
         return f"(Source {index + 1})"
 
@@ -1385,7 +1385,16 @@ def build_citation_from_reference(reference: str, index: int) -> str:
     year = year_match.group(0) if year_match else None
 
     prefix = cleaned[: year_match.start()] if year_match else cleaned
-    prefix = prefix.strip(" ,.;:-()[]")
+    # Keep only the leading author/source segment; drop title/details fragments.
+    for marker in ("“", "\"", "’", "'"):
+        marker_index = prefix.find(marker)
+        if marker_index > 0:
+            prefix = prefix[:marker_index]
+            break
+    if "." in prefix:
+        prefix = prefix.split(".", 1)[0]
+    prefix = normalize_space(prefix).strip(" ,.;:-()[]")
+
     author = ""
     if "," in prefix:
         author = prefix.split(",", 1)[0].strip()

@@ -1,0 +1,11 @@
+.git
+.gitignore
+.vscode
+node_modules
+dist
+test
+assets
+src
+README.md
+manifest*.xml
+*.log

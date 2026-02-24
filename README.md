@@ -230,6 +230,68 @@ Notes:
 * Multi-file runs return `processed-files.zip`.
 * The web app reuses the same underlying scripts and command logic as terminal workflows.
 
+## Cloudflare deployment (separate from local workflow)
+
+Local commands remain unchanged. Cloud deployment uses dedicated files:
+
+* `scripts/workflow-web-server-cloud.cjs`
+* `scripts/pptx_to_docx_with_notes.py` (Linux/LibreOffice-capable for cloud)
+* `Dockerfile.cloudflare`
+* `wrangler.cloud.jsonc`
+* `cloudflare/worker/src/index.ts`
+
+Prerequisites:
+
+```bash
+npx wrangler whoami
+```
+
+If not authenticated:
+
+```bash
+npx wrangler login
+```
+
+Deploy to Cloudflare (Containers):
+
+```bash
+npm run cloud:deploy
+```
+
+Run in Cloudflare dev mode:
+
+```bash
+npm run cloud:dev
+```
+
+Notes:
+
+* This path is fully cloud-hosted and does not run a local processing server.
+* It forwards requests through a Cloudflare Worker to a containerized runtime.
+* Existing local workflows (`npm run doc`, `npm run ppt`, `npm run web:workflows`) are untouched.
+
+### Git push -> auto deploy (GitHub Actions)
+
+This repo includes `.github/workflows/deploy-cloudflare-cloud.yml`.
+
+On every push to `main`, it deploys the cloud worker using:
+
+```bash
+wrangler deploy -c wrangler.cloud.jsonc
+```
+
+Required GitHub repo secrets:
+
+* `CLOUDFLARE_API_TOKEN` (Workers + Containers deploy permissions)
+* `CLOUDFLARE_ACCOUNT_ID` (for this account: `691f6128ed533b9b99116f90517dc27e`)
+
+Set with GitHub CLI:
+
+```bash
+gh secret set CLOUDFLARE_ACCOUNT_ID --repo Mandy9943/referenc-word-extension --body "691f6128ed533b9b99116f90517dc27e"
+gh secret set CLOUDFLARE_API_TOKEN --repo Mandy9943/referenc-word-extension --body "<your-cloudflare-api-token>"
+```
+
 ## Testing & quality
 
 | Command | Purpose |
