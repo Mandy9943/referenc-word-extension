@@ -12,8 +12,7 @@ interface AddinTelemetryPayload {
   metadata?: Record<string, unknown>;
 }
 
-const DEFAULT_LOCAL_TELEMETRY_ORIGIN = "https://localhost:3000";
-const TELEMETRY_PATH = "/telemetry/addin";
+const TELEMETRY_ENDPOINT = "/telemetry/addin";
 const SESSION_STORAGE_KEY = "addinTelemetrySessionId";
 
 function getSessionId(): string {
@@ -85,38 +84,12 @@ export async function emitAddinTelemetry(payload: AddinTelemetryPayload): Promis
       metadata: payload.metadata || {},
     };
 
-    const origin = (() => {
-      try {
-        return window.location.origin;
-      } catch {
-        return "";
-      }
-    })();
-
-    const endpoints: string[] = [];
-    if (origin) {
-      endpoints.push(`${origin}${TELEMETRY_PATH}`);
-    } else {
-      endpoints.push(TELEMETRY_PATH);
-    }
-    if (origin !== DEFAULT_LOCAL_TELEMETRY_ORIGIN) {
-      endpoints.push(`${DEFAULT_LOCAL_TELEMETRY_ORIGIN}${TELEMETRY_PATH}`);
-    }
-
-    for (const endpoint of endpoints) {
-      try {
-        await fetch(endpoint, {
-          method: "POST",
-          mode: "cors",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-          keepalive: true,
-        });
-        break;
-      } catch {
-        // Try next endpoint.
-      }
-    }
+    await fetch(TELEMETRY_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      keepalive: true,
+    });
   } catch {
     // Telemetry must never block user actions.
   }

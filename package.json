@@ -34,8 +34,6 @@
     "signout": "office-addin-dev-settings m365-account logout",
     "start": "office-addin-debugging start manifest.xml",
     "start:desktop": "office-addin-debugging start manifest.xml desktop",
-    "start:desktop:word:local": "office-addin-debugging start manifest.word.xml desktop",
-    "start:desktop:ppt:local": "office-addin-debugging start manifest.powerpoint.xml desktop --app powerpoint",
     "start:desktop:outlook": "office-addin-debugging start manifest.outlook.xml desktop --app outlook",
     "start:web": "office-addin-debugging start manifest.xml web --document \"https://onedrive.live.com/edit?action=editnew&id=FF6D595824C1441B!121&resid=FF6D595824C1441B!121&ithint=file%2cdocx&ct=1738165319104&wdNewAndOpenCt=1738165318104&wdOrigin=OFFICECOM-WEB.MAIN.NEW&wdPreviousSessionSrc=HarmonyWeb&wdPreviousSession=e3913a93-e554-4849-8999-09c2eadb5cd3&wdo=2&cid=ff6d595824c1441b\"",
     "stop": "office-addin-debugging stop manifest.xml",
