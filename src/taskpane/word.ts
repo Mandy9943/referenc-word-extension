@@ -238,13 +238,32 @@ function isHeadingOrTitle(meta: ParagraphMeta, debug: boolean = false): boolean 
   const text = meta.text;
   if (!text) return false;
 
+  // Detect numbered subtitles like "2.1. AI in Road Transport" or "1. Introduction"
+  // These start with a numbering prefix (digits/roman numerals + dots) followed by text.
+  const numberedSubtitleMatch = text.match(/^(\d+(?:\.\d+)*\.?\s+|[IVXivx]+\.?\s+)/);
+  if (numberedSubtitleMatch && meta.wordCount <= 15) {
+    const afterNumber = text.slice(numberedSubtitleMatch[0].length).trim();
+    // If the text after the number is short and doesn't end with sentence-final punctuation,
+    // treat it as a heading/subtitle.
+    const afterWords = afterNumber.split(/\s+/).filter(Boolean);
+    const endsWithSentencePunct = /[.!?]$/.test(afterNumber) && afterWords.length > 3;
+    if (!endsWithSentencePunct) {
+      if (debug) {
+        console.log(
+          `isHeadingOrTitle => numbered subtitle: text="${meta.text.substring(0, 50)}..."`
+        );
+      }
+      return true;
+    }
+  }
+
   const hasTerminalPunctuation = /[.!?]$/.test(text);
   const isShortish = meta.wordCount > 0 && meta.wordCount <= 15;
   const isCentered = meta.alignment === "centered";
 
   const words = text.split(/\s+/).filter(Boolean);
   const capitalised = words.filter((w) => /^[A-Z]/.test(w)).length;
-  const isTitleCase = words.length > 1 && capitalised / words.length > 0.6;
+  const isTitleCase = words.length > 1 && capitalised / words.length >= 0.6;
 
   if (!hasTerminalPunctuation && isShortish && (isCentered || isTitleCase)) {
     if (debug) {
@@ -922,7 +941,6 @@ export async function removeReferences(): Promise<string> {
         if (hadMatch) {
           // Replace only paragraph content (not paragraph mark) to preserve boundaries.
           paragraph.getRange(Word.RangeLocation.content).insertText(text, Word.InsertLocation.replace);
-          paragraph.font.bold = false;
           console.log("Original:", originalText);
           console.log("Updated:", text);
         }
@@ -990,13 +1008,21 @@ export async function removeLinks(deleteAll: boolean = false): Promise<string> {
         const matches = originalText.match(urlRegex);
 
         if (matches) {
-          linksRemovedCount += matches.length;
-          // Replace URL-like text and clean up spaces before punctuation.
-          // Use space/tab-only cleanup so line/paragraph separators are never collapsed.
-          const newText = originalText.replace(urlRegex, "").replace(/[ \t]+([.,;])/g, "$1");
-          // Replace only paragraph content (not paragraph mark) to preserve boundaries.
-          paragraph.getRange(Word.RangeLocation.content).insertText(newText, Word.InsertLocation.replace);
-          paragraph.font.bold = false;
+          // Replace URL-like text, but skip purely numeric patterns like "2.1" or "3.2.1"
+          // that look like section numbering, not URLs.
+          let realRemoved = 0;
+          const newText = originalText
+            .replace(urlRegex, (match) => {
+              if (/^[\d.]+$/.test(match)) return match; // preserve section numbers
+              realRemoved++;
+              return "";
+            })
+            .replace(/[ \t]+([.,;])/g, "$1");
+          linksRemovedCount += realRemoved;
+          if (realRemoved > 0) {
+            // Replace only paragraph content (not paragraph mark) to preserve boundaries.
+            paragraph.getRange(Word.RangeLocation.content).insertText(newText, Word.InsertLocation.replace);
+          }
         }
       }
 
@@ -1071,7 +1097,6 @@ export async function removeWeirdNumbers(): Promise<string> {
           const newText = originalText.replace(weirdNumberPattern, "").replace(/[ \t]{2,}/g, " ");
           // Replace only paragraph content (not paragraph mark) to preserve boundaries.
           paragraph.getRange(Word.RangeLocation.content).insertText(newText, Word.InsertLocation.replace);
-          paragraph.font.bold = false;
         }
       }
 

@@ -484,15 +484,27 @@ def detect_reference_section(paragraphs: Sequence[PptParagraph]) -> Optional[Ref
         if not matches_reference_header(paragraph.text):
             continue
 
-        # Keep header-based extraction scoped to the same text container from
-        # the header onward. Including preceding/other-slide text can pollute
-        # parsed references with body paragraphs.
+        # Primary: same archive_path (slide XML), paragraphs from the header onward.
         reference_keys: Set[ParagraphKey] = {
             paragraph_key(candidate)
             for candidate in paragraphs
             if candidate.archive_path == paragraph.archive_path
             and candidate.paragraph_index >= paragraph.paragraph_index
         }
+
+        # In many PPTX files the title shape ("References") comes LAST in the
+        # XML tree, giving it the highest paragraph_index.  The actual reference
+        # entries live in a content shape with *lower* indexes.  When only the
+        # header was captured, expand to ALL paragraphs on the same slide so
+        # extract_reference_entries can filter the real entries.
+        if len(reference_keys) <= 2:
+            expanded: Set[ParagraphKey] = {
+                paragraph_key(candidate)
+                for candidate in paragraphs
+                if candidate.archive_path == paragraph.archive_path
+            }
+            if len(expanded) > len(reference_keys):
+                reference_keys = expanded
 
         return ReferenceDetection(mode="header", reference_keys=reference_keys)
 
@@ -1360,6 +1372,18 @@ def extract_reference_entries(paragraphs: Sequence[PptParagraph], reference_keys
             if count_reference_like_lines(paragraph.text) > 0:
                 entries.append(paragraph.text)
 
+    # Last-resort fallback: if strict filtering found nothing, accept any
+    # non-header paragraph that contains a year AND at least 5 words.  This
+    # catches references formatted in non-standard ways (e.g. missing author
+    # commas, unusual punctuation) that the stricter heuristics reject.
+    if not entries:
+        for paragraph in section_paragraphs:
+            text = normalize_space(paragraph.text)
+            if matches_reference_header(text):
+                continue
+            if count_words(text) >= 5 and YEAR_RE.search(text):
+                entries.append(text)
+
     deduped: List[str] = []
     seen = set()
     for entry in entries:
@@ -1427,6 +1451,29 @@ def build_step_3_eligible_paragraphs(
     return candidates
 
 
+def _inferred_detection_fallback(
+    paragraphs: Sequence[PptParagraph],
+) -> Optional[ReferenceDetection]:
+    """Try inferred-slide / inferred-notes detection (skips header search)."""
+    for kind, mode_label in (("slide", "inferred-slide"), ("notes", "inferred-notes")):
+        inferred_file_number = infer_reference_file_number(paragraphs, kind)
+        if inferred_file_number == -1:
+            continue
+        reference_keys = {
+            paragraph_key(paragraph)
+            for paragraph in paragraphs
+            if paragraph.kind == kind and paragraph.file_number == inferred_file_number
+        }
+        if reference_keys:
+            return ReferenceDetection(
+                mode=mode_label,
+                reference_keys=reference_keys,
+                inferred_kind=kind,
+                inferred_file_number=inferred_file_number,
+            )
+    return None
+
+
 def run_step_3_add_references(paragraphs: Sequence[PptParagraph]) -> Step3Stats:
     detection = detect_reference_section(paragraphs)
     if detection is None:
@@ -1436,6 +1483,16 @@ def run_step_3_add_references(paragraphs: Sequence[PptParagraph]) -> Step3Stats:
         )
 
     references = extract_reference_entries(paragraphs, detection.reference_keys)
+
+    # Fallback: when header detection found the header but couldn't extract
+    # references (e.g. non-standard layout), retry with inferred detection
+    # which scores slides by reference-line density instead.
+    if not references and detection.mode == "header":
+        fallback = _inferred_detection_fallback(paragraphs)
+        if fallback:
+            detection = fallback
+            references = extract_reference_entries(paragraphs, detection.reference_keys)
+
     if not references:
         raise RuntimeError(
             "Reference section detected but no valid references could be parsed. "
