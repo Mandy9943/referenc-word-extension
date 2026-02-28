@@ -21,7 +21,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 API_URL_DEFAULT = "https://analizeai.com/paraphrase-batch"
 PARAPHRASE_DELIMITER = "qbpdelim123"
@@ -1433,9 +1433,10 @@ def build_citation_from_reference(reference: str, index: int) -> str:
     return f"({author})"
 
 
-def select_sentence_index_for_citation(text: str) -> int:
+def citation_sentence_indexes(text: str) -> List[int]:
     sentences = split_sentences(text)
     candidate_indexes: List[int] = []
+
     for i, sentence in enumerate(sentences):
         stripped = sentence.strip()
         if not stripped:
@@ -1446,29 +1447,73 @@ def select_sentence_index_for_citation(text: str) -> int:
             continue
         if EXISTING_CITATION_RE.search(stripped):
             continue
+
         lower = stripped.lower()
-        if lower.startswith("in conclusion") or lower.startswith("to conclude") or lower.startswith("overall,") or lower.startswith("to sum up"):
+        if (
+            lower.startswith("in conclusion")
+            or lower.startswith("to conclude")
+            or lower.startswith("overall,")
+            or lower.startswith("to sum up")
+        ):
             continue
+
         candidate_indexes.append(i)
 
     if candidate_indexes:
-        return candidate_indexes[-1]
+        return candidate_indexes
 
     if not EXISTING_CITATION_RE.search(text) and count_words(text) >= 8:
-        return max(0, len(sentences) - 1)
-    return -1
+        return [max(0, len(sentences) - 1)]
+
+    return []
 
 
-def inject_citation_into_paragraph(text: str, citation: str) -> Tuple[str, bool]:
+def choose_reference_index(rng: random.Random, citation_count: int, used_reference_indexes: Set[int]) -> int:
+    if citation_count <= 0:
+        return 0
+    if len(used_reference_indexes) < citation_count:
+        pool = [index for index in range(citation_count) if index not in used_reference_indexes]
+        selected = rng.choice(pool)
+        used_reference_indexes.add(selected)
+        return selected
+    return rng.randrange(citation_count)
+
+
+def inject_citations_into_paragraph(
+    text: str,
+    citations: Sequence[str],
+    rng: random.Random,
+    used_reference_indexes: Set[int],
+) -> Tuple[str, int]:
     sentences = split_sentences(text)
-    sentence_index = select_sentence_index_for_citation(text)
-    if sentence_index == -1:
-        return text, False
+    sentence_indexes = citation_sentence_indexes(text)
+    if not sentence_indexes:
+        return text, 0
+
+    max_insertions = min(3, len(sentence_indexes))
+    if max_insertions >= 3:
+        insertion_count = 2 + rng.randint(0, 1)  # 2 or 3
+    elif max_insertions == 2:
+        insertion_count = 2
+    else:
+        insertion_count = 1
+
+    selected_indexes = sorted(rng.sample(sentence_indexes, insertion_count))
 
     updated_sentences = list(sentences)
-    updated_sentences[sentence_index] = append_citation_at_sentence_end(updated_sentences[sentence_index], citation)
+    inserted = 0
+    for sentence_index in selected_indexes:
+        reference_index = choose_reference_index(rng, len(citations), used_reference_indexes)
+        citation = citations[reference_index]
+        new_sentence = append_citation_at_sentence_end(updated_sentences[sentence_index], citation)
+        if new_sentence != updated_sentences[sentence_index]:
+            updated_sentences[sentence_index] = new_sentence
+            inserted += 1
+
     reconstructed = "".join(updated_sentences)
-    return reconstructed, reconstructed != text
+    if reconstructed == text:
+        return text, 0
+    return reconstructed, inserted
 
 
 def run_step_3_add_references(paragraphs: Sequence[Paragraph]) -> Step3Stats:
@@ -1519,22 +1564,23 @@ def run_step_3_add_references(paragraphs: Sequence[Paragraph]) -> Step3Stats:
     if not candidates:
         raise RuntimeError("No eligible body paragraphs found for inserting references.")
 
-    target_count = min(len(candidates), max(1, len(citations)))
-    inserted = 0
-    citation_cursor = 0
+    inserted_total = 0
+    rng = random.Random()
+    used_reference_indexes: Set[int] = set()
 
     for paragraph in candidates:
-        if inserted >= target_count:
-            break
-        citation = citations[citation_cursor % len(citations)]
-        updated_text, changed = inject_citation_into_paragraph(paragraph.text, citation)
-        if not changed:
+        updated_text, inserted_count = inject_citations_into_paragraph(
+            paragraph.text,
+            citations,
+            rng,
+            used_reference_indexes,
+        )
+        if inserted_count <= 0:
             continue
         set_paragraph_text(paragraph, updated_text)
-        inserted += 1
-        citation_cursor += 1
+        inserted_total += inserted_count
 
-    if inserted == 0:
+    if inserted_total == 0:
         raise RuntimeError(
             "Reference section was detected, but no citations could be inserted into body paragraphs."
         )
@@ -1543,7 +1589,7 @@ def run_step_3_add_references(paragraphs: Sequence[Paragraph]) -> Step3Stats:
         detection_mode=detection_mode,
         reference_start_index=reference_start_index,
         reference_count=len(references),
-        inserted_citations=inserted,
+        inserted_citations=inserted_total,
     )
 
 

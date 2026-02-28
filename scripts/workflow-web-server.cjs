@@ -15,6 +15,9 @@ const webRoot = path.join(__dirname, "workflow-web");
 const stagingRoot = path.join(os.tmpdir(), "referenc-workflow-upload-staging");
 const jobsRoot = path.join(os.tmpdir(), "referenc-workflow-jobs");
 const pptToDocScript = "/Users/andreibucur/tools/pptx_to_docx_with_notes.py";
+const GEMINI_MODEL = "gemini-2.5-flash-lite";
+const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || "").trim();
 
 const workflows = {
   "ppt-to-doc": {
@@ -65,6 +68,76 @@ const upload = multer({
 
 app.use(express.json());
 app.use(express.static(webRoot));
+
+function buildGeminiPrompt(references) {
+  return `
+Rewrite the following list of references like this: (author name, year).
+Put blank space between references and write them one below the other.
+Don't number them and don't use bullet points.
+Never add intro text like: "Here is the list of references formatted in the style you requested".
+If the list includes these words, never output them: Books, Journal Articles, Websites, Additional References.
+Always use citation format: (author name, year), for example: (Buzan, 2010).
+
+Example:
+\`\`\`
+(Buzan, 2010)
+
+(Buzan, 2010)
+\`\`\`
+
+Here's the list:
+${references}
+`.trim();
+}
+
+async function callGeminiFormatter(references) {
+  if (!GEMINI_API_KEY) {
+    const error = new Error("Gemini API key is not configured on server.");
+    error.statusCode = 500;
+    throw error;
+  }
+
+  const prompt = buildGeminiPrompt(references);
+  const response = await fetch(`${GEMINI_API_URL}?key=${encodeURIComponent(GEMINI_API_KEY)}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+    }),
+  });
+
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch (_) {
+    payload = null;
+  }
+
+  if (!response.ok) {
+    const message =
+      payload?.error?.message ||
+      `Gemini request failed with HTTP ${response.status}`;
+    const error = new Error(message);
+    error.statusCode = response.status >= 400 && response.status < 500 ? 400 : 502;
+    throw error;
+  }
+
+  const text =
+    payload?.candidates?.[0]?.content?.parts
+      ?.map((part) => (typeof part?.text === "string" ? part.text : ""))
+      .join("")
+      .trim() || "";
+
+  if (!text) {
+    const error = new Error("Gemini returned no text.");
+    error.statusCode = 502;
+    throw error;
+  }
+
+  return text;
+}
 
 function safeBaseName(name) {
   const parsed = path.parse(name || "file");
@@ -283,7 +356,27 @@ async function createZipArchive(outputPath, files, logger) {
 }
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, workflows: Object.keys(workflows) });
+  res.json({
+    ok: true,
+    workflows: Object.keys(workflows),
+    geminiConfigured: Boolean(GEMINI_API_KEY),
+  });
+});
+
+app.post("/api/gemini-format", async (req, res) => {
+  const references = typeof req.body?.references === "string" ? req.body.references.trim() : "";
+  if (!references) {
+    res.status(400).json({ error: "Missing references text." });
+    return;
+  }
+
+  try {
+    const text = await callGeminiFormatter(references);
+    res.json({ text });
+  } catch (error) {
+    const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
+    res.status(statusCode).json({ error: error?.message || "Gemini formatting failed." });
+  }
 });
 
 app.post("/api/process", upload.array("files", 50), async (req, res) => {

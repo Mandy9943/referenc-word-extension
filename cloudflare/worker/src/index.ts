@@ -18,6 +18,7 @@ type WorkflowContainerNamespace = {
 type Env = {
   WORKFLOW_CONTAINER: WorkflowContainerNamespace;
   WORKFLOW_CONTAINER_NAME?: string;
+  GEMINI_API_KEY?: string;
 };
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -37,8 +38,17 @@ export default {
 
     const containerName = env.WORKFLOW_CONTAINER_NAME || "workflow-web-singleton";
     const container = env.WORKFLOW_CONTAINER.getByName(containerName);
+    const forwardHeaders = new Headers(request.headers);
+    const geminiKey = (env.GEMINI_API_KEY || "").trim();
+
+    if (geminiKey) {
+      // Worker secret is injected only on the edge side, so forward it to container runtime.
+      forwardHeaders.set("x-workflow-gemini-key", geminiKey);
+    }
+
+    const forwardedRequest = new Request(request, { headers: forwardHeaders });
 
     await container.startAndWaitForPorts();
-    return container.fetch(request);
+    return container.fetch(forwardedRequest);
   },
 };

@@ -574,13 +574,12 @@ function getSentenceSlotsForParagraph(paragraphIndex: number, sentenceRanges: Wo
     slots.push({ paragraphIndex, sentenceIndex: i });
   }
 
-  // Safety rule: at most one sentence per paragraph.
-  // This avoids multi-range mutations inside the same paragraph, which can destabilize
-  // Word range anchors and occasionally collapse visual paragraph boundaries.
-  if (slots.length <= 1) return slots;
+  if (slots.length === 0) return slots;
 
   shuffleInPlace(slots);
-  return [slots[0]];
+  const maxForShape = Math.min(3, slots.length);
+  const targetCount = 1 + Math.floor(Math.random() * maxForShape);
+  return slots.slice(0, targetCount);
 }
 
 function appendCitationAtSentenceEnd(sentence: string, citation: string): string {
